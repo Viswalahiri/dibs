@@ -11,75 +11,58 @@ type State string
 const (
 	// StateBaseline was already open when the repository was adopted. It is
 	// recorded so the waterline has something to compare against, and is never
-	// enriched, scored, or surfaced.
+	// screened or surfaced.
 	StateBaseline State = "baseline"
 
-	StateNew      State = "new"      // inserted, awaiting enrichment
-	StateEnriched State = "enriched" // context fetched, awaiting filter and triage
-	StateScored   State = "scored"   // above the junk floor, awaiting the push worker
-	StatePushed   State = "pushed"   // individual Slack alert sent
-	StateTracked  State = "tracked"  // operator pressed Track
-	StateSkipped  State = "skipped"  // operator pressed Skip
-	StateSnoozed  State = "snoozed"  // operator pressed Snooze, will resurface
+	StateNew   State = "new"   // inserted, awaiting the enricher
+	StateReady State = "ready" // survived the filter, awaiting the push worker
 
-	StateRejected State = "rejected" // filter, veto, or junk floor; see RejectReason
+	// StatePushed is the end of the line. Dibs sends the notification and
+	// stops; claiming happens in the browser and dibs never hears about it.
+	StatePushed State = "pushed"
+
+	StateRejected State = "rejected" // killed by the filter; see RejectReason
 	StateAgedOut  State = "aged_out" // older than the freshness cutoff at first sight
 
 	// StateClaimedBeforePush means the re-check immediately before the Slack
 	// send found the issue taken. No notification was sent.
 	StateClaimedBeforePush State = "claimed_before_push"
 
-	StateExpired State = "expired" // aged out of scored or snoozed
-
-	// StateBackfilled came from `dibs backfill` rather than the poller. It is
-	// scored for calibration and never surfaced, which is why it is terminal
-	// and why no worker claims it. A backfilled row still carries the
-	// RejectReason the filter or the floor would have given it, so the corpus
-	// records what would have happened as well as the score.
-	StateBackfilled State = "backfilled"
+	// StateExpired is a ready issue the push worker never got to, which in
+	// practice means Slack was unreachable for long enough that claiming it is
+	// no longer realistic.
+	StateExpired State = "expired"
 )
 
 // RejectReason explains a StateRejected row. Every rejection carries one.
 type RejectReason string
 
 const (
-	ReasonAlreadyAssigned  RejectReason = "already_assigned"
-	ReasonLinkedPRExists   RejectReason = "linked_pr_exists"
-	ReasonKillfileLabel    RejectReason = "killfile_label"
-	ReasonClaimedInThread  RejectReason = "claimed_in_thread"
-	ReasonTooThin          RejectReason = "too_thin"
-	ReasonVetoSelfFixing   RejectReason = "veto_self_fixing"
-	ReasonVetoAlreadyTaken RejectReason = "veto_already_taken"
-	ReasonVetoPoorlyScoped RejectReason = "veto_poorly_scoped"
-	ReasonBelowFloor       RejectReason = "below_floor"
+	ReasonLinkedPRExists  RejectReason = "linked_pr_exists"
+	ReasonKillfileLabel   RejectReason = "killfile_label"
+	ReasonClaimedInThread RejectReason = "claimed_in_thread"
+	ReasonTooThin         RejectReason = "too_thin"
 )
 
-// transitions is the complete set of legal moves. A state whose entry is empty
-// is terminal. Snoozed returns to scored rather than straight to pushed so the
-// resurfaced issue goes back through the push worker's freshness re-check
-// instead of needing a second copy of it.
+// transitions is the complete set of legal moves. A state whose entry is
+// empty is terminal, and most of them are: an issue either becomes a
+// notification or it does not.
 var transitions = map[State][]State{
 	StateBaseline:          {},
-	StateNew:               {StateEnriched, StateRejected},
-	StateEnriched:          {StateScored, StateRejected},
-	StateScored:            {StatePushed, StateClaimedBeforePush, StateExpired},
-	StatePushed:            {StateTracked, StateSkipped, StateSnoozed, StateExpired},
-	StateSnoozed:           {StateScored, StateExpired},
-	StateTracked:           {},
-	StateSkipped:           {},
+	StateNew:               {StateReady, StateRejected},
+	StateReady:             {StatePushed, StateClaimedBeforePush, StateExpired},
+	StatePushed:            {},
 	StateRejected:          {},
 	StateAgedOut:           {},
 	StateClaimedBeforePush: {},
 	StateExpired:           {},
-	StateBackfilled:        {},
 }
 
 // claimable states are the ones a worker leases rows from. Anything else is
 // either terminal or waiting on a human.
 var claimable = map[State]bool{
-	StateNew:      true,
-	StateEnriched: true,
-	StateScored:   true,
+	StateNew:   true,
+	StateReady: true,
 }
 
 func (s State) Valid() bool {

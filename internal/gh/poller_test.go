@@ -503,9 +503,9 @@ func TestLowBudgetDoublesTheIntervalWithoutCompounding(t *testing.T) {
 	}
 }
 
-// The enricher's author-stats lookup hits /search, which answers with its own
-// bucket: twenty-eight of thirty left, resetting within the minute. That
-// reading used to land in the core budget and pause a poller on a full tank.
+// /search answers with its own rate-limit bucket: twenty-eight of thirty left,
+// resetting within the minute. That reading used to land in the core budget and
+// pause a poller on a full tank. Only headers for the core resource count.
 func TestSearchBucketDoesNotPauseThePoller(t *testing.T) {
 	h := newHarness(t)
 	h.gh.set(`W/"1"`, issue(1, h.now.Add(-3*time.Hour)))
@@ -514,7 +514,9 @@ func TestSearchBucketDoesNotPauseThePoller(t *testing.T) {
 	h.tick(t) // adoption records a healthy core budget
 	h.reload(t)
 
-	var res searchResult
+	var res struct {
+		TotalCount int `json:"total_count"`
+	}
 	if _, _, err := h.poller.client.GetJSON(
 		context.Background(), "/search/issues?per_page=1&q=x", "", &res); err != nil {
 		t.Fatalf("search: %v", err)

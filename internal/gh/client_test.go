@@ -329,7 +329,7 @@ func TestIsPullRequestDistinguishesListItems(t *testing.T) {
 		t.Error("a plain issue reported itself as a pull request")
 	}
 	if !(Issue{PullRequest: &PullRequestRef{URL: "u"}}).IsPullRequest() {
-		t.Error("a pull request was not detected; it would be triaged as an issue")
+		t.Error("a pull request was not detected; it would be surfaced as an issue")
 	}
 }
 

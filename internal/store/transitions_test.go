@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func seedPushed(t *testing.T, s *Store) (int64, time.Time) {
+func seedNew(t *testing.T, s *Store) (int64, time.Time) {
 	t.Helper()
 	ctx := context.Background()
 	now := time.Unix(1_700_000_000, 0).UTC()
@@ -24,86 +24,50 @@ func seedPushed(t *testing.T, s *Store) (int64, time.Time) {
 	id, inserted, err := s.Insert(ctx, Issue{
 		RepoID: repoID, Number: 7, NodeID: "I_7", Title: "Drain deadlocks",
 		HTMLURL: "https://example.invalid/7", Author: "reporter", AuthorAssoc: "NONE",
-		CreatedAt: now, FirstSeenAt: now, State: StateEnriched,
+		CreatedAt: now, FirstSeenAt: now, State: StateNew,
 	})
 	if err != nil || !inserted {
 		t.Fatalf("seed: inserted=%v err=%v", inserted, err)
 	}
-	if err := s.SaveTriage(ctx, id, TriageResult{Score: 82, State: StateScored}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Surface(ctx, id, now); err != nil {
-		t.Fatal(err)
-	}
 	return id, now
 }
 
-// Every button handler guards with a conditional update and checks how many
-// rows it changed, so a double tap is a no-op rather than a double process.
-// This is the property that makes the Slack handlers safe to be careless with.
-func TestDecideIsIdempotent(t *testing.T) {
-	for _, state := range []State{StateTracked, StateSkipped, StateSnoozed} {
-		t.Run(string(state), func(t *testing.T) {
+// Every write that advances an issue is a conditional update that checks how
+// many rows it changed. A worker whose lease expired mid-flight can therefore
+// finish and write its result harmlessly, which is the property that lets the
+// reaper hand rows back without coordinating with anyone.
+func TestSaveVerdictIsIdempotent(t *testing.T) {
+	for _, tt := range []struct {
+		state  State
+		reason RejectReason
+	}{
+		{StateReady, ""},
+		{StateRejected, ReasonKillfileLabel},
+	} {
+		t.Run(string(tt.state), func(t *testing.T) {
 			s := testStore(t)
 			ctx := context.Background()
-			id, now := seedPushed(t, s)
+			id, _ := seedNew(t, s)
 
-			if err := s.Decide(ctx, id, state, now); err != nil {
-				t.Fatalf("first press: %v", err)
+			if err := s.SaveVerdict(ctx, id, tt.state, tt.reason); err != nil {
+				t.Fatalf("first write: %v", err)
 			}
-			err := s.Decide(ctx, id, state, now.Add(time.Second))
+			err := s.SaveVerdict(ctx, id, tt.state, tt.reason)
 			if !errors.Is(err, ErrNotClaimable) {
-				t.Fatalf("second press returned %v, want ErrNotClaimable", err)
+				t.Fatalf("second write returned %v, want ErrNotClaimable", err)
 			}
 
 			iss, err := s.IssueByID(ctx, id)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if iss.State != state {
-				t.Errorf("state is %s, want %s", iss.State, state)
+			if iss.State != tt.state {
+				t.Errorf("state is %s, want %s", iss.State, tt.state)
 			}
-			if !iss.DecidedAt.Equal(now) {
-				t.Errorf("the second press moved decided_at to %v", iss.DecidedAt)
+			if iss.RejectReason != tt.reason {
+				t.Errorf("reason is %q, want %q", iss.RejectReason, tt.reason)
 			}
 		})
-	}
-}
-
-// Pressing a different button after the first one is also refused. The row has
-// left `pushed`, and there is no path back.
-func TestDecideRefusesASecondDifferentButton(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	id, now := seedPushed(t, s)
-
-	if err := s.Decide(ctx, id, StateTracked, now); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Decide(ctx, id, StateSkipped, now); !errors.Is(err, ErrNotClaimable) {
-		t.Fatalf("skip after track returned %v, want ErrNotClaimable", err)
-	}
-}
-
-// Track is recorded once no matter how many times it is pressed, so the outcome
-// table never grows a duplicate.
-func TestTrackIsIdempotent(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	id, now := seedPushed(t, s)
-
-	for i := 0; i < 3; i++ {
-		if err := s.Track(ctx, id, now); err != nil {
-			t.Fatalf("track %d: %v", i, err)
-		}
-	}
-	var n int
-	if err := s.DB().QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM tracked WHERE issue_id = ?`, id).Scan(&n); err != nil {
-		t.Fatal(err)
-	}
-	if n != 1 {
-		t.Fatalf("tracked %d times, want 1", n)
 	}
 }
 
@@ -112,15 +76,49 @@ func TestTrackIsIdempotent(t *testing.T) {
 func TestIllegalTransitionsAreRefused(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	id, now := seedPushed(t, s)
+	id, now := seedNew(t, s)
 
-	// pushed -> scored is not in the table.
+	// new -> pushed skips the filter, and is not in the table.
 	if err := s.Surface(ctx, id, now); err == nil {
-		t.Fatal("surfacing an already pushed issue was allowed")
+		t.Fatal("surfacing an unscreened issue was allowed")
 	}
-	// A rejection with no reason is refused: every rejection carries one.
-	if err := s.SaveTriage(ctx, id, TriageResult{State: StateRejected}); err == nil {
+	// Every rejection carries a reason, so a reasonless one is refused before
+	// it reaches the database.
+	if err := s.SaveVerdict(ctx, id, StateRejected, ""); err == nil {
 		t.Fatal("a reasonless rejection was allowed")
+	}
+	// The row is untouched by either refusal.
+	iss, err := s.IssueByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if iss.State != StateNew {
+		t.Errorf("state is %s, want it left in %s", iss.State, StateNew)
+	}
+}
+
+// Pushing is the end of the line. There is no path out of it, so a repeated
+// send is refused rather than notifying twice.
+func TestSurfaceHappensOnce(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	id, now := seedNew(t, s)
+
+	if err := s.SaveVerdict(ctx, id, StateReady, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Surface(ctx, id, now); err != nil {
+		t.Fatalf("first surface: %v", err)
+	}
+	if err := s.Surface(ctx, id, now.Add(time.Second)); !errors.Is(err, ErrNotClaimable) {
+		t.Fatalf("second surface returned %v, want ErrNotClaimable", err)
+	}
+	iss, err := s.IssueByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !iss.SurfacedAt.Equal(now) {
+		t.Errorf("the second send moved surfaced_at to %v", iss.SurfacedAt)
 	}
 }
 

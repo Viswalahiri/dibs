@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/Viswalahiri/dibs/internal/config"
-	"github.com/Viswalahiri/dibs/internal/gh"
 	"github.com/Viswalahiri/dibs/internal/store"
 )
 
@@ -28,12 +27,12 @@ func issue(mut ...func(*store.Issue)) store.Issue {
 	return iss
 }
 
-func comment(login, body string) gh.Comment {
-	return gh.Comment{Login: login, Assoc: "NONE", Body: body}
+func comment(login, body string) Comment {
+	return Comment{Login: login, Assoc: "NONE", Body: body}
 }
 
 func TestApplyPasses(t *testing.T) {
-	got := Apply(issue(), gh.Context{}, cfg())
+	got := Apply(issue(), Context{}, cfg())
 	if got.Rejected {
 		t.Fatalf("a clean issue was rejected as %s", got.Reason)
 	}
@@ -43,12 +42,12 @@ func TestApplyRejects(t *testing.T) {
 	tests := []struct {
 		name string
 		iss  store.Issue
-		ctx  gh.Context
+		ctx  Context
 		want store.RejectReason
 	}{
 		{
 			name: "an open pull request is linked",
-			ctx:  gh.Context{HasLinkedPR: true},
+			ctx:  Context{HasLinkedPR: true},
 			iss:  issue(),
 			want: store.ReasonLinkedPRExists,
 		},
@@ -60,7 +59,7 @@ func TestApplyRejects(t *testing.T) {
 		{
 			name: "someone else claimed it in the thread",
 			iss:  issue(),
-			ctx:  gh.Context{Comments: []gh.Comment{comment("rando", "taking this")}},
+			ctx:  Context{Comments: []Comment{comment("rando", "taking this")}},
 			want: store.ReasonClaimedInThread,
 		},
 		{
@@ -80,11 +79,11 @@ func TestApplyRejects(t *testing.T) {
 }
 
 // An assignee is not a claim. Projects hand them out by round-robin, by
-// CODEOWNERS, and by bot, and killing on one costs real issues. Triage scores
-// the assignment instead.
+// CODEOWNERS, and by bot, and killing on one costs real issues. The alert
+// reports the assignment and the operator decides.
 func TestAssignmentAloneDoesNotReject(t *testing.T) {
 	iss := issue(func(i *store.Issue) { i.Assignees = []string{"maintainer", "some-bot"} })
-	if got := Apply(iss, gh.Context{}, cfg()); got.Rejected {
+	if got := Apply(iss, Context{}, cfg()); got.Rejected {
 		t.Fatalf("an assigned issue was rejected as %s", got.Reason)
 	}
 }
@@ -97,7 +96,7 @@ func TestApplyReportsTheFirstReason(t *testing.T) {
 		i.Labels = []string{"wontfix"}
 		i.Body = "hm"
 	})
-	got := Apply(iss, gh.Context{HasLinkedPR: true}, cfg())
+	got := Apply(iss, Context{HasLinkedPR: true}, cfg())
 	if got.Reason != store.ReasonLinkedPRExists {
 		t.Fatalf("got %s, want %s", got.Reason, store.ReasonLinkedPRExists)
 	}
@@ -113,7 +112,7 @@ func TestKillfileLabels(t *testing.T) {
 	}
 	for _, label := range rejected {
 		t.Run(label, func(t *testing.T) {
-			got := Apply(issue(func(i *store.Issue) { i.Labels = []string{label} }), gh.Context{}, cfg())
+			got := Apply(issue(func(i *store.Issue) { i.Labels = []string{label} }), Context{}, cfg())
 			if got.Reason != store.ReasonKillfileLabel {
 				t.Fatalf("label %q was not killed, got %+v", label, got)
 			}
@@ -128,7 +127,7 @@ func TestKillfileLabels(t *testing.T) {
 	}
 	for _, label := range kept {
 		t.Run("keeps "+label, func(t *testing.T) {
-			got := Apply(issue(func(i *store.Issue) { i.Labels = []string{label} }), gh.Context{}, cfg())
+			got := Apply(issue(func(i *store.Issue) { i.Labels = []string{label} }), Context{}, cfg())
 			if got.Rejected {
 				t.Fatalf("label %q was killed as %s", label, got.Reason)
 			}
@@ -168,7 +167,7 @@ func TestClaimRegexAlternatives(t *testing.T) {
 	}
 	for _, body := range claims {
 		t.Run(body, func(t *testing.T) {
-			ctx := gh.Context{Comments: []gh.Comment{comment("rando", body)}}
+			ctx := Context{Comments: []Comment{comment("rando", body)}}
 			if got := Apply(issue(), ctx, cfg()); got.Reason != store.ReasonClaimedInThread {
 				t.Fatalf("%q was not read as a claim, got %+v", body, got)
 			}
@@ -194,7 +193,7 @@ func TestClaimRegexNegatives(t *testing.T) {
 	}
 	for _, body := range notClaims {
 		t.Run(body, func(t *testing.T) {
-			ctx := gh.Context{Comments: []gh.Comment{comment("rando", body)}}
+			ctx := Context{Comments: []Comment{comment("rando", body)}}
 			if got := Apply(issue(), ctx, cfg()); got.Rejected {
 				t.Fatalf("%q was read as a claim: %s", body, got.Reason)
 			}
@@ -203,12 +202,12 @@ func TestClaimRegexNegatives(t *testing.T) {
 }
 
 func TestOperatorsOwnClaimIsNotARejection(t *testing.T) {
-	ctx := gh.Context{Comments: []gh.Comment{comment(self, "taking this")}}
+	ctx := Context{Comments: []Comment{comment(self, "taking this")}}
 	if got := Apply(issue(), ctx, cfg()); got.Rejected {
 		t.Fatalf("the operator's own claim rejected the issue as %s", got.Reason)
 	}
 	// GitHub logins are case-insensitive, and the config file is typed by hand.
-	ctx = gh.Context{Comments: []gh.Comment{comment(strings.ToUpper(self), "taking this")}}
+	ctx = Context{Comments: []Comment{comment(strings.ToUpper(self), "taking this")}}
 	if got := Apply(issue(), ctx, cfg()); got.Rejected {
 		t.Fatalf("a case-different spelling of the operator rejected the issue as %s", got.Reason)
 	}
@@ -226,7 +225,7 @@ func TestQuotedClaimsAreIgnored(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := gh.Context{Comments: []gh.Comment{comment("rando", tt.body)}}
+			ctx := Context{Comments: []Comment{comment("rando", tt.body)}}
 			if got := Apply(issue(), ctx, cfg()); got.Rejected {
 				t.Fatalf("a quoted claim rejected the issue as %s", got.Reason)
 			}
@@ -236,7 +235,7 @@ func TestQuotedClaimsAreIgnored(t *testing.T) {
 
 func TestUnfencedClaimAfterAQuoteStillCounts(t *testing.T) {
 	body := "> is anyone on this?\n\nYes, I'm on it."
-	ctx := gh.Context{Comments: []gh.Comment{comment("rando", body)}}
+	ctx := Context{Comments: []Comment{comment("rando", body)}}
 	if got := Apply(issue(), ctx, cfg()); got.Reason != store.ReasonClaimedInThread {
 		t.Fatalf("a real claim below a quote was missed, got %+v", got)
 	}
@@ -259,7 +258,7 @@ func TestTooThin(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := Apply(issue(func(i *store.Issue) { i.Body = tt.body }), gh.Context{}, cfg())
+			got := Apply(issue(func(i *store.Issue) { i.Body = tt.body }), Context{}, cfg())
 			if rejected := got.Reason == store.ReasonTooThin; rejected != tt.want {
 				t.Fatalf("body %q: rejected as thin = %v, want %v", tt.body, rejected, tt.want)
 			}

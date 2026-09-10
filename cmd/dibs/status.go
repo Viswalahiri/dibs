@@ -13,8 +13,7 @@ import (
 func cmdStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	repos := fs.Bool("repos", false, "per-repository counts by state")
-	today := fs.Bool("today", false, "everything scored in the last 24 hours")
-	missed := fs.Bool("missed", false, "issues that scored below the floor in the last 24 hours")
+	today := fs.Bool("today", false, "everything notified in the last 24 hours")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -30,11 +29,9 @@ func cmdStatus(args []string) error {
 	case *repos:
 		return reportRepos(ctx, l)
 	case *today:
-		return reportScored(ctx, l, false)
-	case *missed:
-		return reportScored(ctx, l, true)
+		return reportPushed(ctx, l)
 	}
-	return errors.New("usage: dibs status <--repos|--today|--missed>")
+	return errors.New("usage: dibs status <--repos|--today>")
 }
 
 func reportRepos(ctx context.Context, l *loaded) error {
@@ -65,21 +62,15 @@ func reportRepos(ctx context.Context, l *loaded) error {
 	return nil
 }
 
-// reportScored lists the last day's scored issues. With onlyMissed it shows
-// just the ones the floor killed, which is the list M4 reads to decide whether
-// the floor is set right.
-func reportScored(ctx context.Context, l *loaded, onlyMissed bool) error {
-	since := time.Now().UTC().Add(-24 * time.Hour)
-	issues, err := l.store.ScoredSince(ctx, since)
+// reportPushed lists the last day's notifications, newest first. It is the
+// answer to "what did dibs send me while I was away".
+func reportPushed(ctx context.Context, l *loaded) error {
+	issues, err := l.store.PushedSince(ctx, time.Now().UTC().Add(-24*time.Hour))
 	if err != nil {
 		return err
 	}
 	repos := map[int64]store.Repo{}
-	shown := 0
 	for _, iss := range issues {
-		if onlyMissed && iss.RejectReason != store.ReasonBelowFloor {
-			continue
-		}
 		repo, ok := repos[iss.RepoID]
 		if !ok {
 			if repo, err = l.store.RepoByID(ctx, iss.RepoID); err != nil {
@@ -87,15 +78,10 @@ func reportScored(ctx context.Context, l *loaded, onlyMissed bool) error {
 			}
 			repos[iss.RepoID] = repo
 		}
-		detail := string(iss.State)
-		if iss.RejectReason != "" {
-			detail = string(iss.RejectReason)
-		}
-		fmt.Printf("%3d  %-24s #%-6d %-18s %s\n",
-			iss.Score.Int64, repo.Slug(), iss.Number, detail, iss.Title)
-		shown++
+		fmt.Printf("%s  %-24s #%-6d %s\n",
+			iss.SurfacedAt.Format("15:04"), repo.Slug(), iss.Number, iss.Title)
 	}
-	if shown == 0 {
+	if len(issues) == 0 {
 		fmt.Println("nothing in the last 24 hours")
 	}
 	return nil
@@ -105,10 +91,9 @@ func reportScored(ctx context.Context, l *loaded, onlyMissed bool) error {
 // way every time.
 func formatCounts(counts map[store.State]int) string {
 	order := []store.State{
-		store.StateBaseline, store.StateNew, store.StateEnriched, store.StateScored,
-		store.StatePushed, store.StateTracked, store.StateSkipped, store.StateSnoozed,
+		store.StateBaseline, store.StateNew, store.StateReady, store.StatePushed,
 		store.StateRejected, store.StateAgedOut, store.StateClaimedBeforePush,
-		store.StateExpired, store.StateBackfilled,
+		store.StateExpired,
 	}
 	out := ""
 	for _, st := range order {

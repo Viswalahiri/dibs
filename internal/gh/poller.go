@@ -17,7 +17,7 @@ import (
 // here, so there is no signal plumbing between the two.
 const supervisorInterval = 30 * time.Second
 
-// listPageSize is deliberately small. The poller never paginates; anything
+// listPageSize is deliberately small. Nothing in dibs paginates: anything
 // beyond the newest page in a 45-second window is either already known or
 // already stale.
 const listPageSize = 30

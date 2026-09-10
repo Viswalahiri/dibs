@@ -7,7 +7,7 @@ import (
 )
 
 // StaleIssues returns issues sitting in state since before the cutoff, oldest
-// first. The reaper reads it to age out issues nobody decided on.
+// first. The reaper reads it to age out issues the push worker never got to.
 func (s *Store) StaleIssues(ctx context.Context, state State, seenBefore time.Time) ([]Issue, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+issueColumns+` FROM issues
@@ -25,55 +25,6 @@ func (s *Store) StaleIssues(ctx context.Context, state State, seenBefore time.Ti
 			return nil, err
 		}
 		out = append(out, iss)
-	}
-	return out, rows.Err()
-}
-
-// ScoresBetween returns the scores of every issue first seen in [from, to),
-// ascending. The reaper reads it for the daily distribution, which is the
-// instrument that catches a model scoring everything high.
-func (s *Store) ScoresBetween(ctx context.Context, from, to time.Time) ([]int, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT score FROM issues
-		 WHERE score IS NOT NULL AND first_seen_at >= ? AND first_seen_at < ?
-		 ORDER BY score`, from.Unix(), to.Unix())
-	if err != nil {
-		return nil, fmt.Errorf("read scores: %w", err)
-	}
-	defer rows.Close()
-
-	var out []int
-	for rows.Next() {
-		var n int
-		if err := rows.Scan(&n); err != nil {
-			return nil, err
-		}
-		out = append(out, n)
-	}
-	return out, rows.Err()
-}
-
-// DecisionCounts counts the buttons pressed in [from, to). The skip rate it
-// yields is the alert-fatigue instrument: sustained above half, the junk floor
-// is too low.
-func (s *Store) DecisionCounts(ctx context.Context, from, to time.Time) (map[State]int, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT state, COUNT(*) FROM issues
-		 WHERE decided_at IS NOT NULL AND decided_at >= ? AND decided_at < ?
-		 GROUP BY state`, from.Unix(), to.Unix())
-	if err != nil {
-		return nil, fmt.Errorf("read decisions: %w", err)
-	}
-	defer rows.Close()
-
-	out := map[State]int{}
-	for rows.Next() {
-		var st State
-		var n int
-		if err := rows.Scan(&st, &n); err != nil {
-			return nil, err
-		}
-		out[st] = n
 	}
 	return out, rows.Err()
 }
@@ -119,17 +70,4 @@ func (s *Store) SetCadence(ctx context.Context, repoID int64, issuesLast30d, int
 		return fmt.Errorf("set cadence for repo %d: %w", repoID, err)
 	}
 	return nil
-}
-
-// SpendBetween sums the model calls made in [from, to). It is the measured
-// number that replaces the estimate in the plan.
-func (s *Store) SpendBetween(ctx context.Context, from, to time.Time) (calls, input, output int, err error) {
-	row := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*), COALESCE(SUM(input_tok), 0), COALESCE(SUM(output_tok), 0)
-		  FROM triage_runs WHERE created_at >= ? AND created_at < ?`,
-		from.Unix(), to.Unix())
-	if err := row.Scan(&calls, &input, &output); err != nil {
-		return 0, 0, 0, fmt.Errorf("sum spend: %w", err)
-	}
-	return calls, input, output, nil
 }

@@ -8,7 +8,7 @@ define copy_once
 	if [ -e $(2) ]; then echo "keeping  $(2)"; else cp $(1) $(2); echo "created  $(2)"; fi
 endef
 
-.PHONY: build test lint eval setup install cross service logs clean
+.PHONY: build test lint setup install cross service logs clean
 
 build:
 	$(GO) build -o bin/dibs ./cmd/dibs
@@ -19,12 +19,6 @@ test:
 lint:
 	$(GO) vet ./...
 	gofmt -l . | tee /dev/stderr | (! read)
-
-# eval calls a live model against the golden fixtures, so it is never part of
-# `make test`. A model version change would otherwise redden the build for a
-# reason unrelated to the code.
-eval:
-	$(GO) test -tags eval -run TestEval ./internal/triage/...
 
 # cross builds for a VPS. The driver is pure Go, so a static binary needs no
 # toolchain on the far end: moving dibs is an scp and a systemctl enable.
