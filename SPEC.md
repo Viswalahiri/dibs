@@ -136,6 +136,7 @@ polling:
 
 triage:
   model: claude-sonnet-5
+  thinking: disabled           # "adaptive" spends reasoning tokens and time
   max_body_chars: 4000
   max_thread_chars: 2500
   max_doc_chars: 1500
@@ -204,6 +205,7 @@ CREATE TABLE IF NOT EXISTS issues (
   author            TEXT    NOT NULL,
   author_assoc      TEXT    NOT NULL,
   labels            TEXT    NOT NULL DEFAULT '[]',
+  assignees         TEXT    NOT NULL DEFAULT '[]',
   comment_count     INTEGER NOT NULL DEFAULT 0,
   created_at        INTEGER NOT NULL,
   first_seen_at     INTEGER NOT NULL,
@@ -212,6 +214,7 @@ CREATE TABLE IF NOT EXISTS issues (
   score             INTEGER,
   effort_low_h      REAL,
   effort_high_h     REAL,
+  enrichment_json   TEXT,    -- fetched once, read by both the filter and triage
   triage_input      TEXT,    -- exact rendered user message, for replay
   triage_json       TEXT,    -- raw model response
   lease_owner       TEXT,
@@ -252,11 +255,16 @@ CREATE TABLE IF NOT EXISTS doc_cache (
   PRIMARY KEY (repo_id, path)
 );
 
+-- prs_opened is how many pull requests this author has opened in this
+-- repository, not how many of their own issues they fixed. Correlating each
+-- issue with a later PR would cost a request per issue, and the PR count
+-- carries the same signal for a two-request cache entry. The prompt states
+-- what is actually measured.
 CREATE TABLE IF NOT EXISTS author_stats (
   repo_id       INTEGER NOT NULL REFERENCES repos(id),
   login         TEXT    NOT NULL,
   issues_opened INTEGER NOT NULL DEFAULT 0,
-  self_fixed    INTEGER NOT NULL DEFAULT 0,
+  prs_opened    INTEGER NOT NULL DEFAULT 0,
   computed_at   INTEGER NOT NULL,
   PRIMARY KEY (repo_id, login)
 );
@@ -296,6 +304,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_outbox_dedupe
 | `aged_out` | Older than `freshness_cutoff_min` at first sight |
 | `claimed_before_push` | The pre-push re-check found it taken |
 | `expired` | Aged out of `scored` or `snoozed` |
+| `backfilled` | Ingested by `dibs backfill`. Scored for calibration, never surfaced. Terminal, and claimed by no worker, which is what keeps it off Slack. Still carries the `reject_reason` the filter or the floor would have given it. |
 
 `reject_reason` values: `already_assigned`, `linked_pr_exists`, `killfile_label`,
 `claimed_in_thread`, `too_thin`, `veto_self_fixing`, `veto_already_taken`,
@@ -558,8 +567,8 @@ penalty rather than a kill, which is the right outcome for an ambiguous case.
   self_fixing     The author or a maintainer indicates they are already writing
                   a fix. Look for stated intent such as "PR incoming", "I have a
                   patch", "will open a PR shortly". Weigh the author's history:
-                  if they routinely open issues and then fix them themselves,
-                  raise confidence.
+                  if they routinely open issues and also open pull requests in
+                  this repository, raise confidence.
 
   already_taken   Someone other than the contributor has claimed this in the
                   comments, or the issue is assigned, or a linked pull request
@@ -628,8 +637,7 @@ OPENED: {relative, e.g. "4 minutes ago"}
 ... truncated to max_thread_chars
 
 --- AUTHOR HISTORY IN THIS REPO ---
-Opened {issues_opened} issues; {self_fixed} were followed by their own PR
-within 7 days.
+Opened {issues_opened} issues and {prs_opened} pull requests.
 
 --- CONTRIBUTING.md EXCERPT ---
 {cached, truncated to max_doc_chars, or "not available"}

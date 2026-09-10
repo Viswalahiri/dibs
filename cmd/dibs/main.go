@@ -20,11 +20,12 @@ import (
 	"github.com/Viswalahiri/dibs/internal/config"
 	"github.com/Viswalahiri/dibs/internal/gh"
 	"github.com/Viswalahiri/dibs/internal/notify"
+	"github.com/Viswalahiri/dibs/internal/reaper"
 	"github.com/Viswalahiri/dibs/internal/store"
 	"github.com/Viswalahiri/dibs/internal/triage"
 )
 
-const usage = "usage: dibs <run|status|replay>"
+const usage = "usage: dibs <run|status|replay|backfill>"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -44,6 +45,8 @@ func run(args []string) error {
 		return cmdStatus(args[1:])
 	case "replay":
 		return cmdReplay(args[1:])
+	case "backfill":
+		return cmdBackfill(args[1:])
 	default:
 		return fmt.Errorf("unknown command %q; %s", args[0], usage)
 	}
@@ -146,6 +149,7 @@ func cmdRun(args []string) error {
 		triage.NewClient(l.secrets.AnthropicKey, l.cfg), l.store, l.cfg, log)
 	pusher := notify.NewPusher(client, l.store, l.cfg, log)
 	resurfacer := notify.NewResurfacer(l.store, log)
+	reap := reaper.New(client, l.store, l.cfg, log, warn)
 
 	workers := []app.Worker{
 		{Name: "poller", Run: poller.Run},
@@ -153,6 +157,7 @@ func cmdRun(args []string) error {
 		{Name: "triager", Run: triager.Run},
 		{Name: "pusher", Run: pusher.Run},
 		{Name: "resurfacer", Run: resurfacer.Run},
+		{Name: "reaper", Run: reap.Run},
 	}
 
 	if *dryRun {

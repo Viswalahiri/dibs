@@ -13,17 +13,41 @@ used Go before.
 
 ## Status
 
-Milestones 1 through 3 are built and Dibs runs as a systemd user service. That
-unit is M5 work pulled forward, because M4 is a week of watching real issues go
-past and the week cannot start until the thing stays up on its own.
+Milestones 1, 2, 3, and 5 are built, and Dibs runs as a systemd user service.
 
 A poller finds new issues, an enricher fetches the thread and the author's
-history, a deterministic filter throws out the ones already taken, Claude scores
-what is left, and survivors go to Slack with Track, Skip, Snooze, and Why
-buttons.
+history, a deterministic filter throws out the ones already taken, Claude
+scores what is left, and survivors go to Slack with Track, Skip, Snooze, and
+Why buttons. A reaper then follows what became of the issues you took, sets
+each repository's polling rate from how many issues it actually produces, and
+reports the few numbers that say whether the scoring is calibrated.
 
-Still to come: the junk floor and the veto threshold set on real data rather
-than guessed (M4), and the reaper, outcome tracking, and cadence recompute (M5).
+Milestone 4 is the one still open, and it is a week of watching rather than
+code. The junk floor and the veto threshold are still the guessed numbers.
+`dibs replay`, `dibs status --missed`, and `dibs backfill` are what set them on
+evidence, and `make eval` fails until the golden fixture set that week produces
+exists.
+
+## What the reaper does
+
+Every fifteen minutes it returns rows abandoned by a crashed worker and ages
+out issues that sat for `expire_after_days` without a decision.
+
+Every six hours it looks at the issues you pressed Track on. It records when
+GitHub shows you as the assignee and when a pull request of yours appears, and
+when the issue closes it writes the outcome: landed if your pull request was on
+it, lost otherwise. All of that is a read. Dibs never assigns you, comments, or
+opens anything.
+
+After five days on a tracked issue with no pull request of yours, it asks once
+whether the issue is still live. Releasing it is a browser action.
+
+Once a day at `reaper.cadence_recompute_hour` it resets each repository's
+polling interval from the issues that repository has actually produced, and
+logs the previous day's score distribution, spend, and skip rate. Three of
+those readings earn a Slack line rather than a log line, because the symptom is
+otherwise silence: a scoring median above 75 for three days running, a skip
+rate above half, and a repository that rejected over 90% of a week's issues.
 
 ## Quick start
 
@@ -51,6 +75,14 @@ token, and running Dibs as a background service.
 | `dibs status --today` | Everything scored in the last 24 hours. |
 | `dibs status --missed` | What the junk floor killed in the last 24 hours. |
 | `dibs replay [--config path] [-v]` | Re-scores stored model responses under a candidate config and reports how the push and reject sets move. Makes no API calls. |
+| `dibs backfill <owner/repo> --since <dur>` | Scores a repository's recent history into the database and notifies nobody. Use it to build a corpus worth calibrating against, because a week of live running produces only a handful of scored issues. |
+
+Backfilled scores are indicative rather than a replay of what would have been
+pushed. An issue is scored as it stands today, comments and assignees and all,
+not as it stood in the minute it was opened. Those rows are terminal, so no
+worker can pick one up and surface it, and `dibs replay` counts them in its
+totals but keeps them out of its change counts, because they carry no Track or
+Skip of yours to compare against.
 
 ## Adding a repository
 

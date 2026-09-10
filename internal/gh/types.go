@@ -14,6 +14,11 @@ type Issue struct {
 	Comments          int       `json:"comments"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
+
+	// ClosedAt is nil while the issue is open. The reaper reads it to date an
+	// outcome, so an issue closed during a suspend is recorded at the time it
+	// actually closed rather than the time dibs noticed.
+	ClosedAt *time.Time `json:"closed_at"`
 	AuthorAssociation string    `json:"author_association"`
 	User              *User     `json:"user"`
 	Assignee          *User     `json:"assignee"`

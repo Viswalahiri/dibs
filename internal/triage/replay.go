@@ -44,6 +44,13 @@ type Summary struct {
 	TrackedLost   int // tracked issues the candidate would have killed
 	SkippedSpared int // skipped issues the candidate would have suppressed
 	DegradedSkip  int // rows scored by the fallback, excluded from the counts
+
+	// Backfilled counts rows that came from `dibs backfill` rather than a live
+	// push. They carry no operator decision, so they say how the candidate
+	// config behaves on this repository's history but nothing about whether it
+	// agrees with you. They are excluded from the change counts for that
+	// reason.
+	Backfilled int
 }
 
 // Replay re-scores every stored model response under cfg. It reads only the
@@ -101,6 +108,10 @@ func Replay(ctx context.Context, s *store.Store, cfg *config.Config) ([]Row, Sum
 		} else {
 			sum.WouldReject++
 		}
+		if iss.State == store.StateBackfilled {
+			sum.Backfilled++
+			continue
+		}
 		switch {
 		case row.NewPush && !row.StoredPush:
 			sum.NewlyPushed++
@@ -134,7 +145,8 @@ func (s Summary) String() string {
 			"(%d newly pushed, %d newly rejected)\n"+
 			"  %d tracked issues would have been killed  <- the only error that costs anything\n"+
 			"  %d skipped issues would have been suppressed\n"+
+			"  %d backfilled rows counted in the totals but not the changes\n"+
 			"  %d degraded rows excluded",
 		s.Total, s.WouldPush, s.WouldReject, s.NewlyPushed, s.NewlyRejected,
-		s.TrackedLost, s.SkippedSpared, s.DegradedSkip)
+		s.TrackedLost, s.SkippedSpared, s.Backfilled, s.DegradedSkip)
 }

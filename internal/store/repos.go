@@ -183,11 +183,6 @@ func (s *Store) RecordPoll(ctx context.Context, repoID int64, etag string, polle
 	return err
 }
 
-func (s *Store) SetPollInterval(ctx context.Context, repoID int64, sec int) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE repos SET poll_interval_sec = ? WHERE id = ?`, sec, repoID)
-	return err
-}
-
 func nullIfEmpty(s string) any {
 	if s == "" {
 		return nil
