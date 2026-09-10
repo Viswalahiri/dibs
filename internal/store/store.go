@@ -69,15 +69,6 @@ func (s *Store) Close() error { return s.db.Close() }
 // status subcommand's reports.
 func (s *Store) DB() *sql.DB { return s.db }
 
-// unixOrNil maps a zero time to SQL NULL, so "never polled" and "polled at the
-// epoch" stay distinguishable.
-func unixOrNil(t time.Time) any {
-	if t.IsZero() {
-		return nil
-	}
-	return t.Unix()
-}
-
 func timeOrZero(n sql.NullInt64) time.Time {
 	if !n.Valid {
 		return time.Time{}

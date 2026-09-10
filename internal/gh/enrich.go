@@ -3,9 +3,7 @@ package gh
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
-	"net/url"
 	"sync"
 	"time"
 
@@ -140,7 +138,7 @@ func (e *Enricher) Enrich(ctx context.Context, repo store.Repo, iss store.Issue)
 	}
 
 	run(func() error {
-		linked, err := e.hasLinkedPR(ctx, repo, iss.Number)
+		linked, err := e.client.HasOpenLinkedPR(ctx, repo.Owner, repo.Name, iss.Number)
 		if err != nil {
 			return err
 		}
@@ -151,7 +149,7 @@ func (e *Enricher) Enrich(ctx context.Context, repo store.Repo, iss store.Issue)
 	})
 
 	run(func() error {
-		comments, err := e.comments(ctx, repo, iss.Number)
+		comments, err := e.client.Comments(ctx, repo.Owner, repo.Name, iss.Number)
 		if err != nil {
 			return err
 		}
@@ -164,56 +162,6 @@ func (e *Enricher) Enrich(ctx context.Context, repo store.Repo, iss store.Issue)
 	wg.Wait()
 	if len(errs) > 0 {
 		return filter.Context{}, errors.Join(errs...)
-	}
-	return out, nil
-}
-
-// hasLinkedPR reports whether an open pull request already points at the
-// issue. Only an open one means the work is genuinely under way; a closed one
-// is usually an abandoned attempt, which leaves the issue available.
-func (e *Enricher) hasLinkedPR(ctx context.Context, repo store.Repo, number int) (bool, error) {
-	prs, err := e.client.LinkedPRs(ctx, repo.Owner, repo.Name, number)
-	if err != nil {
-		return false, err
-	}
-	for _, pr := range prs {
-		if pr.Open {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-type commentPayload struct {
-	Body              string    `json:"body"`
-	CreatedAt         time.Time `json:"created_at"`
-	AuthorAssociation string    `json:"author_association"`
-	User              *User     `json:"user"`
-}
-
-func (e *Enricher) comments(ctx context.Context, repo store.Repo, number int) ([]filter.Comment, error) {
-	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments?per_page=20",
-		url.PathEscape(repo.Owner), url.PathEscape(repo.Name), number)
-
-	var payload []commentPayload
-	if _, _, err := e.client.GetJSON(ctx, path, "", &payload); err != nil {
-		if notFound(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	out := make([]filter.Comment, 0, len(payload))
-	for _, c := range payload {
-		login := ""
-		if c.User != nil {
-			login = c.User.Login
-		}
-		out = append(out, filter.Comment{
-			Login:     login,
-			Assoc:     c.AuthorAssociation,
-			Body:      c.Body,
-			CreatedAt: c.CreatedAt,
-		})
 	}
 	return out, nil
 }

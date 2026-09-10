@@ -47,7 +47,7 @@ func TestGetSendsRequiredHeaders(t *testing.T) {
 		got = r.Header.Clone()
 		w.Write([]byte(`{}`))
 	})
-	if _, err := c.Get(context.Background(), "/x", `W/"etag"`); err != nil {
+	if _, err := c.get(context.Background(), "/x", `W/"etag"`, defaultAccept); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	for header, want := range map[string]string{
@@ -69,7 +69,7 @@ func TestGetOmitsIfNoneMatchWhenEtagIsEmpty(t *testing.T) {
 		_, had = r.Header["If-None-Match"]
 		w.Write([]byte(`{}`))
 	})
-	if _, err := c.Get(context.Background(), "/x", ""); err != nil {
+	if _, err := c.get(context.Background(), "/x", "", defaultAccept); err != nil {
 		t.Fatal(err)
 	}
 	if had {
@@ -81,7 +81,7 @@ func TestNotModifiedReturnsNoBodyAndKeepsTheEtag(t *testing.T) {
 	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotModified)
 	})
-	resp, err := c.Get(context.Background(), "/x", `W/"abc"`)
+	resp, err := c.get(context.Background(), "/x", `W/"abc"`, defaultAccept)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestBudgetTracksRateLimitHeaders(t *testing.T) {
 	if remaining, _ := c.Budget(); remaining != -1 {
 		t.Errorf("remaining before any request = %d, want -1 for unknown", remaining)
 	}
-	if _, err := c.Get(context.Background(), "/x", ""); err != nil {
+	if _, err := c.get(context.Background(), "/x", "", defaultAccept); err != nil {
 		t.Fatal(err)
 	}
 	remaining, resetAt := c.Budget()
@@ -127,7 +127,7 @@ func TestRetryAfterIsHonouredOnceThenFails(t *testing.T) {
 		w.WriteHeader(http.StatusForbidden)
 		w.Write([]byte(`{"message":"secondary rate limit"}`))
 	})
-	_, err := c.Get(context.Background(), "/x", "")
+	_, err := c.get(context.Background(), "/x", "", defaultAccept)
 	if err == nil {
 		t.Fatal("want an error after the single retry is exhausted")
 	}
@@ -149,7 +149,7 @@ func TestRetryAfterSucceedsOnTheRetry(t *testing.T) {
 		}
 		w.Write([]byte(`{"ok":true}`))
 	})
-	resp, err := c.Get(context.Background(), "/x", "")
+	resp, err := c.get(context.Background(), "/x", "", defaultAccept)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestPrimaryRateLimitWaitsForReset(t *testing.T) {
 		w.Header().Set("X-RateLimit-Remaining", "4999")
 		w.Write([]byte(`{}`))
 	})
-	if _, err := c.Get(context.Background(), "/x", ""); err != nil {
+	if _, err := c.get(context.Background(), "/x", "", defaultAccept); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	got := sleeps.all()
@@ -190,7 +190,7 @@ func TestServerErrorsBackOffAndGiveUp(t *testing.T) {
 		atomic.AddInt32(&calls, 1)
 		w.WriteHeader(http.StatusBadGateway)
 	})
-	_, err := c.Get(context.Background(), "/x", "")
+	_, err := c.get(context.Background(), "/x", "", defaultAccept)
 	if err == nil {
 		t.Fatal("want an error after three failed attempts")
 	}
@@ -219,7 +219,7 @@ func TestServerErrorRecoversWithinTheAttemptBudget(t *testing.T) {
 		}
 		w.Write([]byte(`{"ok":true}`))
 	})
-	resp, err := c.Get(context.Background(), "/x", "")
+	resp, err := c.get(context.Background(), "/x", "", defaultAccept)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -235,7 +235,7 @@ func TestNotFoundIsATerminalStatusError(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 		w.Write([]byte(`{"message":"Not Found"}`))
 	})
-	_, err := c.Get(context.Background(), "/repos/a/b/issues", "")
+	_, err := c.get(context.Background(), "/repos/a/b/issues", "", defaultAccept)
 	var se *StatusError
 	if !errors.As(err, &se) {
 		t.Fatalf("error = %v, want a *StatusError", err)
@@ -271,7 +271,7 @@ func TestConcurrencyIsCapped(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			if _, err := c.Get(context.Background(), fmt.Sprintf("/x/%d", i), ""); err != nil {
+			if _, err := c.get(context.Background(), fmt.Sprintf("/x/%d", i), "", defaultAccept); err != nil {
 				t.Errorf("Get: %v", err)
 			}
 		}(i)
@@ -288,7 +288,7 @@ func TestContextCancellationStopsRetrying(t *testing.T) {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := c.Get(ctx, "/x", ""); !errors.Is(err, context.Canceled) {
+	if _, err := c.get(ctx, "/x", "", defaultAccept); !errors.Is(err, context.Canceled) {
 		t.Errorf("error = %v, want context.Canceled", err)
 	}
 }
@@ -351,10 +351,10 @@ func TestBudgetIgnoresOtherResourceBuckets(t *testing.T) {
 		w.Write([]byte(`{}`))
 	})
 	ctx := context.Background()
-	if _, err := c.Get(ctx, "/repos/acme/widget/issues", ""); err != nil {
+	if _, err := c.get(ctx, "/repos/acme/widget/issues", "", defaultAccept); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Get(ctx, "/search/issues?q=x", ""); err != nil {
+	if _, err := c.get(ctx, "/search/issues?q=x", "", defaultAccept); err != nil {
 		t.Fatal(err)
 	}
 	remaining, resetAt := c.Budget()
@@ -390,10 +390,10 @@ func TestPrimaryRateLimitWaitsForTheRespondingBucketsReset(t *testing.T) {
 		}
 	})
 	ctx := context.Background()
-	if _, err := c.Get(ctx, "/x", ""); err != nil {
+	if _, err := c.get(ctx, "/x", "", defaultAccept); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Get(ctx, "/search/issues?q=x", ""); err != nil {
+	if _, err := c.get(ctx, "/search/issues?q=x", "", defaultAccept); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	got := sleeps.all()

@@ -16,7 +16,6 @@ package filter
 import (
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/Viswalahiri/dibs/internal/config"
 	"github.com/Viswalahiri/dibs/internal/store"
@@ -30,10 +29,8 @@ type Context struct {
 }
 
 type Comment struct {
-	Login     string
-	Assoc     string
-	Body      string
-	CreatedAt time.Time
+	Login string
+	Body  string
 }
 
 // Result is the verdict on one issue. A surviving issue carries no reason.
@@ -148,7 +145,7 @@ func Apply(iss store.Issue, ctx Context, cfg *config.Config) Result {
 	if hasKillfileLabel(iss.Labels) {
 		return reject(store.ReasonKillfileLabel)
 	}
-	if claimedByOther(ctx.Comments, cfg.Profile.GitHubLogin) {
+	if ClaimedByOther(ctx.Comments, cfg.Profile.GitHubLogin) {
 		return reject(store.ReasonClaimedInThread)
 	}
 	if tooThin(iss.Body) {
@@ -169,10 +166,13 @@ func hasKillfileLabel(labels []string) bool {
 	return false
 }
 
-// claimedByOther reports whether anyone but the operator has said they are
+// ClaimedByOther reports whether anyone but the operator has said they are
 // taking the issue. The operator's own claim is not a rejection: it is the
 // outcome this whole system exists to produce.
-func claimedByOther(comments []Comment, self string) bool {
+//
+// The push worker calls it again on freshly fetched comments immediately before
+// sending, so both places decide a claim by the same rule.
+func ClaimedByOther(comments []Comment, self string) bool {
 	for _, c := range comments {
 		if strings.EqualFold(c.Login, self) {
 			continue

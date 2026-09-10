@@ -24,7 +24,6 @@ type Repo struct {
 	WaterlineAt     time.Time // issues created at or before this are never surfaced
 	AdoptedAt       time.Time // zero until adoption has run
 	IssuesLast30d   int
-	Enabled         bool
 }
 
 func (r Repo) Slug() string { return r.Owner + "/" + r.Name }
@@ -100,7 +99,7 @@ func (s *Store) SyncRepos(ctx context.Context, want []config.Repo, defaultInterv
 }
 
 const repoColumns = `id, owner, name, notes, poll_interval_sec,
-	COALESCE(etag, ''), last_polled_at, waterline_at, adopted_at, issues_last_30d, enabled`
+	COALESCE(etag, ''), last_polled_at, waterline_at, adopted_at, issues_last_30d`
 
 func scanRepo(sc interface{ Scan(...any) error }) (Repo, error) {
 	var (
@@ -108,17 +107,15 @@ func scanRepo(sc interface{ Scan(...any) error }) (Repo, error) {
 		lastPolled sql.NullInt64
 		waterline  int64
 		adopted    sql.NullInt64
-		enabled    int
 	)
 	err := sc.Scan(&r.ID, &r.Owner, &r.Name, &r.Notes,
-		&r.PollIntervalSec, &r.ETag, &lastPolled, &waterline, &adopted, &r.IssuesLast30d, &enabled)
+		&r.PollIntervalSec, &r.ETag, &lastPolled, &waterline, &adopted, &r.IssuesLast30d)
 	if err != nil {
 		return Repo{}, err
 	}
 	r.LastPolledAt = timeOrZero(lastPolled)
 	r.WaterlineAt = time.Unix(waterline, 0).UTC()
 	r.AdoptedAt = timeOrZero(adopted)
-	r.Enabled = enabled == 1
 	return r, nil
 }
 

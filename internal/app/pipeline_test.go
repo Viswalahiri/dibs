@@ -49,7 +49,7 @@ func TestPipeline(t *testing.T) {
 	}
 
 	client := gh.New("token", 4, gh.WithBaseURL(github.URL))
-	poller := gh.NewPoller(client, db, cfg, log, nil, nil, gh.WithClock(clock))
+	poller := gh.NewPoller(client, db, cfg, log, nil, gh.WithClock(clock))
 
 	// Adoption draws the waterline and produces no work.
 	if _, err := poller.Tick(ctx, repo.ID); err != nil {
@@ -121,7 +121,7 @@ func TestEnrichmentCostsTwoRequests(t *testing.T) {
 	repo, _ := db.RepoBySlug(ctx, "acme", "widget")
 
 	client := gh.New("token", 4, gh.WithBaseURL(github.URL))
-	poller := gh.NewPoller(client, db, cfg, log, nil, nil,
+	poller := gh.NewPoller(client, db, cfg, log, nil,
 		gh.WithClock(func() time.Time { return now }))
 	if _, err := poller.Tick(ctx, repo.ID); err != nil {
 		t.Fatal(err)
@@ -168,7 +168,7 @@ func TestPipelineRejectsAClaimedIssue(t *testing.T) {
 	repo, _ := db.RepoBySlug(ctx, "acme", "widget")
 
 	client := gh.New("token", 4, gh.WithBaseURL(github.URL))
-	poller := gh.NewPoller(client, db, cfg, log, nil, nil,
+	poller := gh.NewPoller(client, db, cfg, log, nil,
 		gh.WithClock(func() time.Time { return now }))
 	if _, err := poller.Tick(ctx, repo.ID); err != nil {
 		t.Fatal(err)
@@ -223,7 +223,7 @@ func TestPipelineDropsAClaimedIssueBeforePushing(t *testing.T) {
 	repo, _ := db.RepoBySlug(ctx, "acme", "widget")
 
 	client := gh.New("token", 4, gh.WithBaseURL(github.URL))
-	poller := gh.NewPoller(client, db, cfg, log, nil, nil,
+	poller := gh.NewPoller(client, db, cfg, log, nil,
 		gh.WithClock(func() time.Time { return now }))
 	if _, err := poller.Tick(ctx, repo.ID); err != nil {
 		t.Fatal(err)
@@ -276,7 +276,7 @@ func TestACrashedWorkerLosesNoRow(t *testing.T) {
 	}
 
 	client := gh.New("token", 4, gh.WithBaseURL(github.URL))
-	poller := gh.NewPoller(client, db, cfg, log, nil, nil,
+	poller := gh.NewPoller(client, db, cfg, log, nil,
 		gh.WithClock(func() time.Time { return now }))
 	if _, err := poller.Tick(ctx, repo.ID); err != nil {
 		t.Fatal(err)

@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -140,8 +139,8 @@ func seedRepo(t *testing.T, s *Store) Repo {
 
 func newIssue(repoID int64, number int, state State) Issue {
 	return Issue{
-		RepoID: repoID, Number: number, NodeID: "node", Title: "t",
-		HTMLURL: "https://example.invalid", Author: "someone", AuthorAssoc: "NONE",
+		RepoID: repoID, Number: number, Title: "t",
+		HTMLURL: "https://example.invalid", Author: "someone",
 		Labels: []string{"bug"}, CreatedAt: epoch, FirstSeenAt: epoch, State: state,
 	}
 }
@@ -241,50 +240,13 @@ func TestReleaseExpiredLeases(t *testing.T) {
 	}
 }
 
-func TestAdvanceRefusesIllegalTransitions(t *testing.T) {
-	ctx := context.Background()
-	s := open(t)
-	repo := seedRepo(t, s)
-	id, _, err := s.Insert(ctx, newIssue(repo.ID, 1, StateNew))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Advance(ctx, id, StateNew, StatePushed, ""); err == nil {
-		t.Error("new -> pushed should be refused; it would skip the filter")
-	}
-	if err := s.Advance(ctx, id, StateNew, StateRejected, ""); err == nil {
-		t.Error("a rejection without a reason should be refused")
-	}
-	if err := s.Advance(ctx, id, StateNew, StateRejected, ReasonTooThin); err != nil {
-		t.Errorf("legal rejection failed: %v", err)
-	}
-}
-
-func TestAdvanceIsIdempotent(t *testing.T) {
-	ctx := context.Background()
-	s := open(t)
-	repo := seedRepo(t, s)
-	id, _, err := s.Insert(ctx, newIssue(repo.ID, 1, StateNew))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Advance(ctx, id, StateNew, StateReady, ""); err != nil {
-		t.Fatalf("first advance: %v", err)
-	}
-	err = s.Advance(ctx, id, StateNew, StateReady, "")
-	if !errors.Is(err, ErrNotClaimable) {
-		t.Errorf("second advance returned %v, want ErrNotClaimable", err)
-	}
-	iss, err := s.IssueByID(ctx, id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if iss.State != StateReady {
-		t.Errorf("state = %q, want ready", iss.State)
-	}
-}
-
-func TestAdvanceClearsTheLease(t *testing.T) {
+// Advancing a row has to hand it to the next worker, which means clearing the
+// lease in the same statement that changes the state. Leaving the lease behind
+// would strand the row until it expired.
+//
+// The refusal and idempotency of that write are covered against SaveVerdict in
+// transitions_test.go, which drives the same conditional update.
+func TestAdvancingClearsTheLease(t *testing.T) {
 	ctx := context.Background()
 	s := open(t)
 	repo := seedRepo(t, s)
@@ -295,7 +257,7 @@ func TestAdvanceClearsTheLease(t *testing.T) {
 	if _, err := s.Claim(ctx, StateNew, 10, "w1", time.Minute, epoch); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Advance(ctx, id, StateNew, StateReady, ""); err != nil {
+	if err := s.SaveVerdict(ctx, id, StateReady, ""); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.Claim(ctx, StateReady, 10, "w2", time.Minute, epoch)

@@ -138,7 +138,7 @@ func cmdRun(args []string) error {
 	go watchReload(ctx, l, log)
 
 	warn := newWarner(ctx, l.store, log)
-	poller := gh.NewPoller(client, l.store, l.cfg, log, nil, warn)
+	poller := gh.NewPoller(client, l.store, l.cfg, log, warn)
 	enricher := gh.NewEnricher(client, l.store, l.cfg, log)
 	pusher := notify.NewPusher(client, l.store, l.cfg, log)
 	reap := reaper.New(l.store, l.cfg, log, warn)

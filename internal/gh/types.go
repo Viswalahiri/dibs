@@ -6,24 +6,16 @@ import "time"
 // actually reads are declared; GitHub sends far more.
 type Issue struct {
 	Number    int       `json:"number"`
-	NodeID    string    `json:"node_id"`
 	Title     string    `json:"title"`
 	Body      string    `json:"body"`
 	HTMLURL   string    `json:"html_url"`
 	State     string    `json:"state"`
 	Comments  int       `json:"comments"`
 	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-
-	// ClosedAt is nil while the issue is open. The reaper reads it to date an
-	// outcome, so an issue closed during a suspend is recorded at the time it
-	// actually closed rather than the time dibs noticed.
-	ClosedAt          *time.Time `json:"closed_at"`
-	AuthorAssociation string     `json:"author_association"`
-	User              *User      `json:"user"`
-	Assignee          *User      `json:"assignee"`
-	Assignees         []User     `json:"assignees"`
-	Labels            []Label    `json:"labels"`
+	User      *User     `json:"user"`
+	Assignee  *User     `json:"assignee"`
+	Assignees []User    `json:"assignees"`
+	Labels    []Label   `json:"labels"`
 
 	// PullRequest is non-nil when this item is actually a pull request. The
 	// issues endpoint returns both, and forgetting to check this is the most

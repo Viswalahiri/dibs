@@ -169,28 +169,18 @@ func StillAvailable(ctx context.Context, client *gh.Client, repo store.Repo, num
 		return true, "closed", nil
 	}
 
-	var comments []struct {
-		Body string `json:"body"`
-		User *struct {
-			Login string `json:"login"`
-		} `json:"user"`
-	}
-	if _, _, err := client.GetJSON(ctx, base+"/comments?per_page=20", "", &comments); err != nil {
+	comments, err := client.Comments(ctx, repo.Owner, repo.Name, number)
+	if err != nil {
 		return false, "", err
 	}
-	for _, c := range comments {
-		if c.User != nil && c.User.Login == self {
-			continue
-		}
-		if filter.IsClaim(c.Body) {
-			return true, "claimed in thread", nil
-		}
+	if filter.ClaimedByOther(comments, self) {
+		return true, "claimed in thread", nil
 	}
 	return false, "", nil
 }
 
 // newlyAssigned reports whether anyone has taken the issue since dibs recorded
-// it. The operator's own name never counts: him holding it is the outcome this
+// it. The operator's own name never counts: holding it is the outcome this
 // system exists to produce.
 func newlyAssigned(current, known []string, self string) bool {
 	seen := map[string]bool{strings.ToLower(strings.TrimSpace(self)): true}

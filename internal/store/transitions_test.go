@@ -22,8 +22,8 @@ func seedNew(t *testing.T, s *Store) (int64, time.Time) {
 		t.Fatal(err)
 	}
 	id, inserted, err := s.Insert(ctx, Issue{
-		RepoID: repoID, Number: 7, NodeID: "I_7", Title: "Drain deadlocks",
-		HTMLURL: "https://example.invalid/7", Author: "reporter", AuthorAssoc: "NONE",
+		RepoID: repoID, Number: 7, Title: "Drain deadlocks",
+		HTMLURL: "https://example.invalid/7", Author: "reporter",
 		CreatedAt: now, FirstSeenAt: now, State: StateNew,
 	})
 	if err != nil || !inserted {
@@ -135,8 +135,8 @@ func TestClaimHandsARowToOneWorker(t *testing.T) {
 	}
 	repoID, _ := res.LastInsertId()
 	if _, _, err := s.Insert(ctx, Issue{
-		RepoID: repoID, Number: 1, NodeID: "I_1", Title: "t", HTMLURL: "u",
-		Author: "a", AuthorAssoc: "NONE", CreatedAt: now, FirstSeenAt: now, State: StateNew,
+		RepoID: repoID, Number: 1, Title: "t", HTMLURL: "u",
+		Author: "a", CreatedAt: now, FirstSeenAt: now, State: StateNew,
 	}); err != nil {
 		t.Fatal(err)
 	}

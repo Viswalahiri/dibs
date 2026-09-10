@@ -26,13 +26,7 @@ const listPageSize = 30
 // the waterline drawn from them hides everything older regardless.
 const adoptPageSize = 100
 
-// Sink receives issues the poller has just recorded as new. The database is
-// the real handoff to the next stage; this exists so the poller's work is
-// observable before the later stages are built.
-type Sink func(store.Repo, store.Issue)
-
 // Warner reports operational conditions that eventually become Slack messages.
-// M1 logs them.
 type Warner func(kind, message string)
 
 type Poller struct {
@@ -40,7 +34,6 @@ type Poller struct {
 	store  *store.Store
 	cfg    *config.Config
 	log    *slog.Logger
-	sink   Sink
 	warn   Warner
 
 	// now is injectable so tests can place issues either side of the freshness
@@ -56,11 +49,11 @@ type PollerOption func(*Poller)
 
 func WithClock(f func() time.Time) PollerOption { return func(p *Poller) { p.now = f } }
 
-func NewPoller(c *Client, s *store.Store, cfg *config.Config, log *slog.Logger, sink Sink, warn Warner, opts ...PollerOption) *Poller {
+func NewPoller(c *Client, s *store.Store, cfg *config.Config, log *slog.Logger, warn Warner, opts ...PollerOption) *Poller {
 	p := &Poller{
 		client: c, store: s, cfg: cfg, log: log,
-		sink: sink, warn: warn,
-		now: func() time.Time { return time.Now().UTC() },
+		warn: warn,
+		now:  func() time.Time { return time.Now().UTC() },
 	}
 	for _, o := range opts {
 		o(p)
@@ -282,7 +275,7 @@ func (p *Poller) poll(ctx context.Context, repo store.Repo) error {
 			state = store.StateAgedOut
 		}
 
-		id, inserted, err := p.store.Insert(ctx, toStoreIssue(repo, item, now, state))
+		_, inserted, err := p.store.Insert(ctx, toStoreIssue(repo, item, now, state))
 		if err != nil {
 			return err
 		}
@@ -296,16 +289,9 @@ func (p *Poller) poll(ctx context.Context, repo store.Repo) error {
 			continue
 		}
 
-		stored, err := p.store.IssueByID(ctx, id)
-		if err != nil {
-			return err
-		}
 		p.log.Info("new issue",
 			"repo", repo.Slug(), "number", item.Number, "title", item.Title,
 			"age", now.Sub(item.CreatedAt).Round(time.Second))
-		if p.sink != nil {
-			p.sink(repo, stored)
-		}
 	}
 
 	return p.store.RecordPoll(ctx, repo.ID, resp.ETag, now, waterline)
@@ -356,12 +342,10 @@ func toStoreIssue(repo store.Repo, item Issue, seenAt time.Time, state store.Sta
 	return store.Issue{
 		RepoID:       repo.ID,
 		Number:       item.Number,
-		NodeID:       item.NodeID,
 		Title:        item.Title,
 		Body:         item.Body,
 		HTMLURL:      item.HTMLURL,
 		Author:       item.AuthorLogin(),
-		AuthorAssoc:  item.AuthorAssociation,
 		Labels:       item.LabelNames(),
 		Assignees:    item.AssigneeLogins(),
 		CommentCount: item.Comments,
