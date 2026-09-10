@@ -1,0 +1,63 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["vetoes", "dimensions", "effort", "stack", "positives", "top_risk"],
+  "properties": {
+    "vetoes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["self_fixing", "already_taken", "poorly_scoped"],
+      "properties": {
+        "self_fixing": { "$ref": "#/$defs/veto" },
+        "already_taken": { "$ref": "#/$defs/veto" },
+        "poorly_scoped": { "$ref": "#/$defs/veto" }
+      }
+    },
+    "dimensions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope_clarity", "concreteness", "blast_radius",
+                   "maintainer_invitation", "contention_risk"],
+      "properties": {
+        "scope_clarity": { "$ref": "#/$defs/dimension" },
+        "concreteness": { "$ref": "#/$defs/dimension" },
+        "blast_radius": { "$ref": "#/$defs/dimension" },
+        "maintainer_invitation": { "$ref": "#/$defs/dimension" },
+        "contention_risk": { "$ref": "#/$defs/dimension" }
+      }
+    },
+    "effort": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["low_hours", "high_hours", "confidence"],
+      "properties": {
+        "low_hours": { "type": "number" },
+        "high_hours": { "type": "number" },
+        "confidence": { "type": "string", "enum": ["low", "medium", "high"] }
+      }
+    },
+    "stack": { "type": "array", "items": { "type": "string" } },
+    "positives": { "type": "array", "items": { "type": "string" } },
+    "top_risk": { "type": "string" }
+  },
+  "$defs": {
+    "veto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["confidence", "evidence"],
+      "properties": {
+        "confidence": { "type": "number" },
+        "evidence": { "type": "string" }
+      }
+    },
+    "dimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["score", "why"],
+      "properties": {
+        "score": { "type": "integer", "enum": [1, 2, 3, 4, 5] },
+        "why": { "type": "string" }
+      }
+    }
+  }
+}

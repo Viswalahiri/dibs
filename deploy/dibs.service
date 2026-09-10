@@ -1,0 +1,18 @@
+[Unit]
+Description=Dibs - GitHub issue radar
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/dibs run
+EnvironmentFile=%h/.config/dibs/env
+Restart=always
+RestartSec=10
+StandardOutput=append:%h/.local/state/dibs/dibs.log
+StandardError=append:%h/.local/state/dibs/dibs.err
+
+[Install]
+WantedBy=default.target

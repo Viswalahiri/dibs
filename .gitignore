@@ -1,0 +1,17 @@
+bin/
+
+# The database and its WAL sidecars.
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets. The real file lives at ~/.config/dibs/env, but a stray copy here
+# must never be committable. configs/env.example is the tracked template.
+env
+.env
+*.env
+
+# Local config with your real login and repository list. The examples in
+# configs/ are the tracked ones.
+dibs.yaml
+repos.yaml

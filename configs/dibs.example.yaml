@@ -1,0 +1,52 @@
+profile:
+  github_login: your-github-login   # must match the account the token belongs to
+  stacks: [go, typescript, python, rust, postgres]
+  effort_ceiling_hours: 16
+  timezone: America/New_York
+
+scoring:
+  junk_floor: 40                # at or above this, pushed to Slack
+  veto_confidence: 0.60         # below this a veto becomes a -10 penalty
+  weights:                      # equal until dibs replay says otherwise
+    scope_clarity: 20
+    concreteness: 20
+    blast_radius: 20
+    maintainer_invitation: 20
+    contention_risk: 20
+  multipliers:
+    stack_match: 1.00
+    stack_mismatch: 0.70
+    receptivity_high: 1.10
+    receptivity_normal: 1.00
+    receptivity_cautious: 0.85
+
+polling:
+  default_interval_sec: 45
+  min_interval_sec: 30
+  max_concurrent: 4
+  freshness_cutoff_min: 15      # older than this at first sight: recorded and dropped
+  gap_warn_min: 15
+  rate_limit_slow_at: 500
+  rate_limit_pause_at: 100
+
+triage:
+  model: claude-sonnet-5
+  thinking: disabled           # "adaptive" spends reasoning tokens and time; try it during calibration
+  max_body_chars: 4000
+  max_thread_chars: 2500
+  max_doc_chars: 1500
+  max_retries: 2
+  timeout_sec: 45
+  daily_call_cap: 100
+  cost:
+    input_per_mtok_usd: 2.00
+    output_per_mtok_usd: 10.00
+    monthly_budget_usd: 10.00
+
+slack:
+  deliver_to: dm
+
+reaper:
+  expire_after_days: 14
+  cadence_recompute_hour: 3
+  lease_ttl_sec: 300

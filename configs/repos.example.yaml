@@ -1,0 +1,7 @@
+repos:
+  - slug: owner/repo-one
+    receptivity: high           # high | normal | cautious
+    stacks: [go]                # optional, overrides profile.stacks for scoring
+    notes: "maintainer is responsive, PRs merge in ~2 days"
+  - slug: owner/repo-two
+    receptivity: normal
