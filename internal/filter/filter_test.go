@@ -47,11 +47,6 @@ func TestApplyRejects(t *testing.T) {
 		want store.RejectReason
 	}{
 		{
-			name: "assigned to someone",
-			iss:  issue(func(i *store.Issue) { i.Assignees = []string{"maintainer"} }),
-			want: store.ReasonAlreadyAssigned,
-		},
-		{
 			name: "an open pull request is linked",
 			ctx:  gh.Context{HasLinkedPR: true},
 			iss:  issue(),
@@ -84,8 +79,18 @@ func TestApplyRejects(t *testing.T) {
 	}
 }
 
+// An assignee is not a claim. Projects hand them out by round-robin, by
+// CODEOWNERS, and by bot, and killing on one costs real issues. Triage scores
+// the assignment instead.
+func TestAssignmentAloneDoesNotReject(t *testing.T) {
+	iss := issue(func(i *store.Issue) { i.Assignees = []string{"maintainer", "some-bot"} })
+	if got := Apply(iss, gh.Context{}, cfg()); got.Rejected {
+		t.Fatalf("an assigned issue was rejected as %s", got.Reason)
+	}
+}
+
 // The order matters: the reason recorded should be the most specific fact
-// known, and assignment is more specific than a thin body.
+// known, and a linked pull request is more specific than a thin body.
 func TestApplyReportsTheFirstReason(t *testing.T) {
 	iss := issue(func(i *store.Issue) {
 		i.Assignees = []string{"maintainer"}
@@ -93,8 +98,8 @@ func TestApplyReportsTheFirstReason(t *testing.T) {
 		i.Body = "hm"
 	})
 	got := Apply(iss, gh.Context{HasLinkedPR: true}, cfg())
-	if got.Reason != store.ReasonAlreadyAssigned {
-		t.Fatalf("got %s, want %s", got.Reason, store.ReasonAlreadyAssigned)
+	if got.Reason != store.ReasonLinkedPRExists {
+		t.Fatalf("got %s, want %s", got.Reason, store.ReasonLinkedPRExists)
 	}
 }
 

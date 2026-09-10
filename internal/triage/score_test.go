@@ -149,6 +149,30 @@ func TestSoftVetoPenalty(t *testing.T) {
 	}
 }
 
+// An assignee costs points instead of the issue. Projects assign by bot and by
+// round-robin, so the fact is worth pricing but never worth killing on.
+func TestAssigneePenalty(t *testing.T) {
+	tests := []struct {
+		name      string
+		assignees []string
+		want      int
+	}{
+		{"unassigned costs nothing", nil, 100},
+		{"assigned to someone else costs ten", []string{"maintainer"}, 90},
+		{"several assignees still cost ten once", []string{"maintainer", "some-bot"}, 90},
+		{"assigned to the operator costs nothing", []string{"test-user"}, 100},
+		{"the operator match ignores case", []string{"Test-User"}, 100},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			iss := store.Issue{Assignees: tt.assignees}
+			if got := score(t, dims(5), iss, repo(), baseConfig()); got != tt.want {
+				t.Errorf("scored %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSoftVetoPenaltiesStack(t *testing.T) {
 	r := dims(5)
 	r.Vetoes.SelfFixing.Confidence = 0.4

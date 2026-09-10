@@ -84,13 +84,6 @@ func (i Issue) AssigneeLogins() []string {
 	return out
 }
 
-// IsAssigned reports whether anyone holds the issue. GitHub populates both
-// assignee and assignees, but not always consistently on older payloads, so
-// check both.
-func (i Issue) IsAssigned() bool {
-	return i.Assignee != nil || len(i.Assignees) > 0
-}
-
 // AuthenticatedUser is the subset of GET /user that startup validation needs.
 type AuthenticatedUser struct {
 	Login string `json:"login"`

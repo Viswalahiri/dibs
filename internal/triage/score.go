@@ -14,12 +14,20 @@ import (
 // rather than a kill.
 const softVetoFloor = 0.35
 
-// softVetoPenalty and labelPenalty are flat deductions. Both are deliberately
-// blunt: there are already two numbers to tune here, and PLAN's whole argument
-// is that two is a fit that can be done against a hundred issues.
+// softVetoPenalty, labelPenalty, and assigneePenalty are flat deductions. All
+// three are deliberately blunt: there are already two numbers to tune here, and
+// PLAN's whole argument is that two is a fit that can be done against a hundred
+// issues.
+//
+// assigneePenalty is what an assignee costs now that it is no longer a kill in
+// the filter. An assignee is weak evidence of a claim. Kubernetes repositories
+// hand them out through automation, and a bot's round-robin is not a person
+// writing code. The strong signals, a linked pull request and an explicit claim
+// in the thread, still reject outright.
 const (
 	softVetoPenalty = 10
 	labelPenalty    = 10
+	assigneePenalty = 10
 )
 
 // penaltyLabels cost points rather than a kill. Each describes an issue that
@@ -86,7 +94,23 @@ func Composite(r Response, iss store.Issue, repo store.Repo, cfg *config.Config)
 		}
 	}
 
+	if assignedToOther(iss.Assignees, cfg.Profile.GitHubLogin) {
+		out -= assigneePenalty
+	}
+
 	return clampTo100(out), false, ""
+}
+
+// assignedToOther reports whether anyone but the operator holds the assignment.
+// His own assignment is not a penalty: it is the outcome this system exists to
+// produce.
+func assignedToOther(assignees []string, self string) bool {
+	for _, a := range assignees {
+		if !strings.EqualFold(strings.TrimSpace(a), self) {
+			return true
+		}
+	}
+	return false
 }
 
 // effectiveStacks is the repository's own list when it has one, since a repo
