@@ -5,8 +5,8 @@ profile:
   timezone: America/New_York
 
 scoring:
-  junk_floor: 40                # at or above this, pushed to Slack
-  veto_confidence: 0.60         # below this a veto becomes a -10 penalty
+  junk_floor: 0                 # at or above this, pushed to Slack; 0 pushes everything
+  veto_confidence: 1.00         # a veto kills only above this; 1.00 makes every veto a -10 penalty
   weights:                      # equal until dibs replay says otherwise
     scope_clarity: 20
     concreteness: 20
@@ -24,7 +24,7 @@ polling:
   default_interval_sec: 45
   min_interval_sec: 30
   max_concurrent: 4
-  freshness_cutoff_min: 15      # older than this at first sight: recorded and dropped
+  freshness_cutoff_min: 60      # older than this at first sight: recorded and dropped
   gap_warn_min: 15
   rate_limit_slow_at: 500
   rate_limit_pause_at: 100
@@ -37,11 +37,11 @@ triage:
   max_doc_chars: 1500
   max_retries: 2
   timeout_sec: 45
-  daily_call_cap: 100
+  daily_call_cap: 400
   cost:
     input_per_mtok_usd: 2.00
     output_per_mtok_usd: 10.00
-    monthly_budget_usd: 10.00
+    monthly_budget_usd: 25.00
 
 slack:
   deliver_to: dm

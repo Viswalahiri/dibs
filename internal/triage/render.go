@@ -29,6 +29,10 @@ func SystemPrompt(cfg *config.Config) string {
 // author_assoc is always included. OWNER, MEMBER, and COLLABORATOR authors are
 // far more likely to be filing self-tracking tickets, and it is the single most
 // predictive field in the payload.
+//
+// Assignees are included because the already_taken veto asks about them. They
+// used to be a kill in the filter, so the model was being asked to judge a fact
+// it could not see.
 func RenderUserMessage(iss store.Issue, ctx gh.Context, repo store.Repo, cfg *config.Config, now time.Time) string {
 	var b strings.Builder
 
@@ -39,6 +43,7 @@ func RenderUserMessage(iss store.Issue, ctx gh.Context, repo store.Repo, cfg *co
 	fmt.Fprintf(&b, "ISSUE #%d: %s\n", iss.Number, iss.Title)
 	fmt.Fprintf(&b, "AUTHOR: %s (association: %s)\n", orNone(iss.Author), orNone(iss.AuthorAssoc))
 	fmt.Fprintf(&b, "LABELS: %s\n", orNone(strings.Join(iss.Labels, ", ")))
+	fmt.Fprintf(&b, "ASSIGNEES: %s\n", orNone(strings.Join(iss.Assignees, ", ")))
 	fmt.Fprintf(&b, "OPENED: %s\n\n", Ago(now.Sub(iss.CreatedAt)))
 
 	fmt.Fprintf(&b, "--- BODY ---\n%s\n\n", gh.Truncate(strings.TrimSpace(iss.Body), cfg.Triage.MaxBodyChars))

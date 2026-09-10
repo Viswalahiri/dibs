@@ -103,12 +103,54 @@ because everything in that window is stale by definition.
 Between polling an issue and pushing it, Dibs spends five to fifteen seconds on
 enrichment and a model call. On a busy repo that is enough time for someone to
 claim it. So immediately before sending to Slack, Dibs re-fetches the issue. If
-it is now assigned, closed, or has a comment matching the claim patterns, it is
-dropped silently.
+it has picked up an assignee it did not have before, or is closed, or has a
+comment matching the claim patterns, it is dropped silently.
+
+The comparison is against the assignees Dibs already recorded, not against an
+empty list. An issue that was assigned all along is one I decided to look at
+anyway. An assignee that appeared in the last fifteen seconds is somebody taking
+it in front of me.
 
 At a few pushes a day this costs a handful of API requests and buys the thing I
 actually want: a ping means the issue was unclaimed seconds ago. There is a
 second check when I press Track, covering the minutes I spend deciding.
+
+### The floor starts at zero, not high
+
+I had this backwards. The original plan was a high junk floor so the first week
+would be quiet, on the theory that a noisy tool gets ignored.
+
+A quiet week produces nothing to calibrate against. The floor and the veto
+threshold are the two numbers M4 exists to fit, and fitting them needs rows
+where I pressed Track or Skip on something. A floor that suppresses the issue
+before I see it produces a row with no decision attached, which is exactly the
+data the fit cannot use. The first run of this bore that out. Four issues
+scored, zero pushed, and nothing at all learned.
+
+So both numbers ship wide open. Everything the deterministic filter passes goes
+to Slack, no veto kills anything, and the arithmetic still runs and still gets
+recorded. A week of that gives `dibs replay` a corpus with real clicks on it.
+The numbers that come out of the sweep are the ones worth committing.
+
+The cost is a week of skipping most of what arrives. That is a click each, and
+a click is the cheap failure. The expensive failure is a good issue I never saw,
+and that failure leaves no trace anywhere I would think to look.
+
+### An assignee is not a claim
+
+The filter used to kill any issue with an assignee. That was the first check it
+ran, and on the repositories I watch it was wrong more often than right.
+Kubernetes projects assign by round-robin, by CODEOWNERS, and by bot, so the
+field says almost nothing about whether a person is writing code.
+
+The strong signals are somebody having acted. A linked pull request means code
+exists. A comment saying "taking this" means somebody said it out loud. Those
+still reject. Assignment now costs ten points in scoring, and the model sees the
+assignee list so it can read the thread around it.
+
+The one place assignment still rejects outright is a change during the window,
+which the freshness re-check watches for. That is not a field being set. That is
+somebody arriving while I was deciding.
 
 ### One stream, no digest
 
@@ -215,7 +257,7 @@ rejection with full unit coverage.
 **M3, triage and Slack together.** Claude integration, scoring, Block Kit,
 buttons, outbox. This ships Slack rather than holding it back, because
 time-to-value is the whole point and a shadow-mode HTML file is a throwaway.
-The junk floor starts high enough that the first week is quiet.
+The junk floor starts at zero so the first week is loud on purpose.
 
 **M4, calibration.** Run it for a week. Use `dibs replay` and the nightly
 missed-issue list to set the floor and the veto threshold on evidence. The only

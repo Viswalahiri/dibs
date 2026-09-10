@@ -54,11 +54,23 @@ type Profile struct {
 // Location returns the operator's timezone, used for the daily call-cap reset.
 func (p Profile) Location() *time.Location { return p.loc }
 
+// Scoring is the tunable half of the system. Both numbers ship wide open: the
+// floor pushes everything and the veto threshold kills nothing, so a week of
+// running produces a corpus with a real Track and Skip on each row. `dibs
+// replay` sweeps candidate values over that corpus, and the numbers that come
+// out of it are the ones worth committing.
 type Scoring struct {
-	JunkFloor      int         `yaml:"junk_floor"`
-	VetoConfidence float64     `yaml:"veto_confidence"`
-	Weights        Weights     `yaml:"weights"`
-	Multipliers    Multipliers `yaml:"multipliers"`
+	// JunkFloor is the score at or above which an issue reaches Slack. Zero
+	// pushes everything.
+	JunkFloor int `yaml:"junk_floor"`
+
+	// VetoConfidence is the confidence a veto must exceed to kill an issue
+	// outright. The comparison is exclusive, so 1.00 means no veto ever kills
+	// and every one of them lands as a flat penalty instead.
+	VetoConfidence float64 `yaml:"veto_confidence"`
+
+	Weights     Weights     `yaml:"weights"`
+	Multipliers Multipliers `yaml:"multipliers"`
 }
 
 type Weights struct {
@@ -329,8 +341,8 @@ func defaults() *Config {
 			Timezone:           "UTC",
 		},
 		Scoring: Scoring{
-			JunkFloor:      40,
-			VetoConfidence: 0.60,
+			JunkFloor:      0,
+			VetoConfidence: 1.00,
 			Weights: Weights{
 				ScopeClarity: 20, Concreteness: 20, BlastRadius: 20,
 				MaintainerInvitation: 20, ContentionRisk: 20,
@@ -345,7 +357,7 @@ func defaults() *Config {
 			DefaultIntervalSec: 45,
 			MinIntervalSec:     30,
 			MaxConcurrent:      4,
-			FreshnessCutoffMin: 15,
+			FreshnessCutoffMin: 60,
 			GapWarnMin:         15,
 			RateLimitSlowAt:    500,
 			RateLimitPauseAt:   100,
@@ -358,11 +370,11 @@ func defaults() *Config {
 			MaxDocChars:    1500,
 			MaxRetries:     2,
 			TimeoutSec:     45,
-			DailyCallCap:   100,
+			DailyCallCap:   400,
 			Cost: Cost{
 				InputPerMTokUSD:  2.00,
 				OutputPerMTokUSD: 10.00,
-				MonthlyBudgetUSD: 10.00,
+				MonthlyBudgetUSD: 25.00,
 			},
 		},
 		Slack: Slack{DeliverTo: "dm"},

@@ -19,10 +19,11 @@ import (
 // needs to.
 const triageBatch = 3
 
-// degradedScore is where an issue lands when the model could not be reached or
-// could not produce a usable answer. It sits above the shipped junk floor
-// deliberately: a model outage must never silently swallow issues, and a
-// wrongly pushed issue costs one click.
+// degradedScore is where an issue lands when the model could not be reached,
+// could not produce a usable answer, or was never asked because the spend cap
+// had already tripped. It sits in the middle of the range deliberately: nothing
+// about an unscored issue should silently swallow it, and a wrongly pushed
+// issue costs one click.
 const degradedScore = 50
 
 // Worker scores enriched issues. It runs the deterministic filter first, so
@@ -116,17 +117,26 @@ func (w *Worker) one(ctx context.Context, iss store.Issue) error {
 		})
 	}
 
-	if reason, blocked, err := w.spendBlocked(ctx); err != nil {
-		return err
-	} else if blocked {
-		// Leave the issue in enriched. The lease expires and it is picked up
-		// again once the cap or the budget window rolls over.
-		return fmt.Errorf("triage paused: %s", reason)
-	}
-
 	now := w.now()
 	system := SystemPrompt(w.cfg)
 	user := RenderUserMessage(iss, enriched, repo, w.cfg, now)
+
+	if reason, blocked, err := w.spendBlocked(ctx); err != nil {
+		return err
+	} else if blocked {
+		// Fail open, exactly as a model outage does below. Parking the issue
+		// until the window rolls over would surface it hours late, and an issue
+		// surfaced hours late is one somebody else has already taken. The cap
+		// still does its job: no further model call is made.
+		w.log.Error("triage capped, scoring open",
+			"repo", repo.Slug(), "number", iss.Number, "reason", reason)
+		return w.store.SaveTriage(ctx, iss.ID, store.TriageResult{
+			Score: degradedScore,
+			Input: user,
+			JSON:  degradedJSON(errors.New(reason)),
+			State: store.StateScored,
+		})
+	}
 
 	result, attempts, scoreErr := w.client.Score(ctx, system, user)
 	for _, a := range attempts {

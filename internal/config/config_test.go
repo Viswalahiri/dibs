@@ -16,14 +16,19 @@ func TestSparseConfigTakesDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if cfg.Scoring.JunkFloor != 40 {
-		t.Errorf("junk_floor = %d, want 40", cfg.Scoring.JunkFloor)
+	// Both scoring numbers ship wide open, so a fresh install pushes everything
+	// and produces a corpus worth calibrating against.
+	if cfg.Scoring.JunkFloor != 0 {
+		t.Errorf("junk_floor = %d, want 0", cfg.Scoring.JunkFloor)
+	}
+	if cfg.Scoring.VetoConfidence != 1.00 {
+		t.Errorf("veto_confidence = %v, want 1.00", cfg.Scoring.VetoConfidence)
 	}
 	if got := cfg.Scoring.Weights.Sum(); got != 100 {
 		t.Errorf("default weights sum = %d, want 100", got)
 	}
-	if got := cfg.Polling.FreshnessCutoff(); got != 15*time.Minute {
-		t.Errorf("freshness cutoff = %v, want 15m", got)
+	if got := cfg.Polling.FreshnessCutoff(); got != 60*time.Minute {
+		t.Errorf("freshness cutoff = %v, want 60m", got)
 	}
 	if got := cfg.Polling.DefaultInterval(); got != 45*time.Second {
 		t.Errorf("default interval = %v, want 45s", got)

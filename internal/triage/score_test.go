@@ -104,8 +104,9 @@ func TestHardVeto(t *testing.T) {
 	}
 }
 
-// The threshold is inclusive, and one hundredth below it must not kill the
-// issue. This is one of the two numbers M4 tunes, so the boundary has to be
+// The threshold is exclusive, so a veto has to be more confident than the
+// configured number to kill. That is what lets 1.00 turn every veto into a
+// penalty. This is one of the two numbers M4 tunes, so the boundary has to be
 // exact or the calibration means nothing.
 func TestVetoThresholdBoundary(t *testing.T) {
 	cfg := baseConfig()
@@ -114,7 +115,7 @@ func TestVetoThresholdBoundary(t *testing.T) {
 		wantKill   bool
 	}{
 		{0.59, false},
-		{0.60, true},
+		{0.60, false},
 		{0.61, true},
 	}
 	for _, tt := range tests {
@@ -137,6 +138,7 @@ func TestSoftVetoPenalty(t *testing.T) {
 		{"at the soft floor costs ten", 0.35, 90},
 		{"hedging costs ten", 0.50, 90},
 		{"just below the kill line still costs ten", 0.59, 90},
+		{"at the kill line still costs ten", 0.60, 90},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -144,6 +146,47 @@ func TestSoftVetoPenalty(t *testing.T) {
 			r.Vetoes.PoorlyScoped.Confidence = tt.confidence
 			if got := score(t, r, store.Issue{}, repo(), baseConfig()); got != tt.want {
 				t.Errorf("confidence %v scored %d, want %d", tt.confidence, got, tt.want)
+			}
+		})
+	}
+}
+
+// The shipped default. Nothing the model can return exceeds 1.0, so every veto
+// lands as a penalty and the issue still reaches Slack with the doubt priced in.
+func TestVetoConfidenceOfOneNeverKills(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Scoring.VetoConfidence = 1.00
+
+	r := dims(5)
+	r.Vetoes.AlreadyTaken.Confidence = 1.00
+	got, rejected, _ := Composite(r, store.Issue{}, repo(), cfg)
+	if rejected {
+		t.Fatal("a veto killed the issue at a threshold of 1.00")
+	}
+	if got != 90 {
+		t.Errorf("scored %d, want 90 after the flat veto penalty", got)
+	}
+}
+
+// An assignee costs points instead of the issue. Projects assign by bot and by
+// round-robin, so the fact is worth pricing but never worth killing on.
+func TestAssigneePenalty(t *testing.T) {
+	tests := []struct {
+		name      string
+		assignees []string
+		want      int
+	}{
+		{"unassigned costs nothing", nil, 100},
+		{"assigned to someone else costs ten", []string{"maintainer"}, 90},
+		{"several assignees still cost ten once", []string{"maintainer", "some-bot"}, 90},
+		{"assigned to the operator costs nothing", []string{"test-user"}, 100},
+		{"the operator match ignores case", []string{"Test-User"}, 100},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			iss := store.Issue{Assignees: tt.assignees}
+			if got := score(t, dims(5), iss, repo(), baseConfig()); got != tt.want {
+				t.Errorf("scored %d, want %d", got, tt.want)
 			}
 		})
 	}

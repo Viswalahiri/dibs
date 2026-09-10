@@ -21,8 +21,14 @@ penalty rather than a kill, which is the right outcome for an ambiguous case.
                   this repository, raise confidence.
 
   already_taken   Someone other than the contributor has claimed this in the
-                  comments, or the issue is assigned, or a linked pull request
-                  already exists.
+                  comments, or a maintainer has said it is spoken for.
+
+                  An assignee alone is not a claim. Many projects assign
+                  automatically, by round-robin, by CODEOWNERS, or by a bot, and
+                  an assigned issue with no other activity is usually still open
+                  in practice. Raise confidence when the assignee has also
+                  commented, or when the thread shows work under way. Otherwise
+                  leave it low and let the score carry the doubt.
 
   poorly_scoped   There is no way to tell what "done" looks like. No
                   reproduction, no expected behaviour, no acceptance criteria,

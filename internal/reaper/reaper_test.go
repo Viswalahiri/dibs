@@ -265,17 +265,37 @@ func TestRubricWarningNeedsAStreak(t *testing.T) {
 // TestSkipRateWarning is the alert-fatigue instrument. Skipping most of what
 // arrives means the junk floor is too low.
 func TestSkipRateWarning(t *testing.T) {
-	r, db, repoID := newReaper(t, githubFixture{})
 	yesterday := time.Date(2026, 3, 19, 12, 0, 0, 0, time.UTC)
-	for i := 1; i <= 4; i++ {
-		decide(t, db, repoID, i, store.StateSkipped, yesterday)
+	seedSkips := func(t *testing.T, db *store.Store, repoID int64) {
+		t.Helper()
+		for i := 1; i <= 4; i++ {
+			decide(t, db, repoID, i, store.StateSkipped, yesterday)
+		}
+		decide(t, db, repoID, 5, store.StateTracked, yesterday)
 	}
-	decide(t, db, repoID, 5, store.StateTracked, yesterday)
 
-	if err := r.Tick(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	assertWarning(t, db, "junk_floor")
+	t.Run("a floor that admits junk warns", func(t *testing.T) {
+		r, db, repoID := newReaper(t, githubFixture{})
+		seedSkips(t, db, repoID)
+		if err := r.Tick(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		assertWarning(t, db, "junk_floor")
+	})
+
+	// At a floor of zero the operator asked to see everything, so skipping most
+	// of it is the arrangement working. Warning daily about a deliberate choice
+	// is how an instrument stops being read.
+	t.Run("no floor means no warning", func(t *testing.T) {
+		r, db, repoID := newReaper(t, githubFixture{}, func(c *config.Config) {
+			c.Scoring.JunkFloor = 0
+		})
+		seedSkips(t, db, repoID)
+		if err := r.Tick(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		assertNoWarning(t, db, "junk_floor")
+	})
 }
 
 // TestDarkRepoWarning catches a repository that has stopped producing anything
@@ -412,7 +432,7 @@ func crossReference(prURL, author, state string) []any {
 	}}
 }
 
-func newReaper(t *testing.T, fixture githubFixture) (*Reaper, *store.Store, int64) {
+func newReaper(t *testing.T, fixture githubFixture, mut ...func(*config.Config)) (*Reaper, *store.Store, int64) {
 	t.Helper()
 	server := httptest.NewServer(fixture.handler(t))
 	t.Cleanup(server.Close)
@@ -432,11 +452,17 @@ func newReaper(t *testing.T, fixture githubFixture) (*Reaper, *store.Store, int6
 		t.Fatal(err)
 	}
 
+	// The floor is set here rather than left at zero because most of these tests
+	// are about instruments that only mean something once a floor exists.
 	cfg := &config.Config{
 		Profile: config.Profile{GitHubLogin: "test-user", EffortCeilingHours: 16},
+		Scoring: config.Scoring{JunkFloor: 40, VetoConfidence: 0.60},
 		Polling: config.Polling{DefaultIntervalSec: 45, MinIntervalSec: 30, MaxConcurrent: 4},
 		Triage:  config.Triage{Cost: config.Cost{InputPerMTokUSD: 2, OutputPerMTokUSD: 10}},
 		Reaper:  config.Reaper{ExpireAfterDays: 14, CadenceRecomputeHour: 3, LeaseTTLSec: 300},
+	}
+	for _, f := range mut {
+		f(cfg)
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	warn := func(kind, message string) {

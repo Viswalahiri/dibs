@@ -28,6 +28,40 @@ code. The junk floor and the veto threshold are still the guessed numbers.
 evidence, and `make eval` fails until the golden fixture set that week produces
 exists.
 
+## Calibration mode
+
+Dibs ships wide open. `junk_floor` is `0` and `veto_confidence` is `1.00`, so
+every issue that survives the deterministic filter reaches Slack and no model
+veto kills anything. Both numbers still do their arithmetic, and every score is
+still recorded, which is the point. A week of running that way produces a
+corpus where each row carries a real Track or Skip of yours, and `dibs replay`
+sweeps candidate floors and thresholds over it without spending a cent. The
+numbers that come out of that are worth committing. The numbers you would pick
+today are guesses.
+
+The cost of this posture is a noisier Slack. Expect to skip most of what
+arrives during the first week. That is the arrangement working, not a fault,
+which is why the skip-rate warning stays quiet while the floor is zero.
+
+Once replay has an answer, set the two numbers and Dibs goes back to being
+selective.
+
+## What is a claim
+
+Only two things reject an issue for being taken. A linked pull request means
+somebody has written code. A comment saying "taking this" means somebody said
+so out loud. Both are people acting.
+
+An assignee is not either of those. Projects hand assignments out by
+round-robin, by CODEOWNERS, and by bot, and an assigned issue with no other
+activity is usually still open in practice. Assignment costs ten points in
+scoring, and the model is shown the assignee list so it can weigh the thread
+around it. It never kills the issue on its own.
+
+What does count is an assignee arriving after Dibs first recorded the issue.
+That is somebody taking it during the window, and the push worker drops the
+issue when it sees one.
+
 ## What the reaper does
 
 Every fifteen minutes it returns rows abandoned by a crashed worker and ages
@@ -48,6 +82,10 @@ logs the previous day's score distribution, spend, and skip rate. Three of
 those readings earn a Slack line rather than a log line, because the symptom is
 otherwise silence: a scoring median above 75 for three days running, a skip
 rate above half, and a repository that rejected over 90% of a week's issues.
+
+The skip-rate line is the exception while `junk_floor` is `0`. A high skip rate
+is what you asked for at that setting, so it stays in the log until a floor is
+actually set.
 
 ## Quick start
 
@@ -73,7 +111,7 @@ token, and running Dibs as a background service.
 | `dibs run` | The daemon. Add `--dry-run` to print alerts to stdout instead of Slack, which needs only the GitHub and Anthropic tokens. |
 | `dibs status --repos` | Each repository's waterline and issue counts by state. |
 | `dibs status --today` | Everything scored in the last 24 hours. |
-| `dibs status --missed` | What the junk floor killed in the last 24 hours. |
+| `dibs status --missed` | What the junk floor killed in the last 24 hours. Empty while the floor is `0`, which is the point of running that way. |
 | `dibs replay [--config path] [-v]` | Re-scores stored model responses under a candidate config and reports how the push and reject sets move. Makes no API calls. |
 | `dibs backfill <owner/repo> --since <dur>` | Scores a repository's recent history into the database and notifies nobody. Use it to build a corpus worth calibrating against, because a week of live running produces only a handful of scored issues. |
 
@@ -90,12 +128,23 @@ A repository joins at the waterline. Dibs records what is currently open,
 surfaces none of it, and starts from there. Adding one costs zero enrichment
 requests and zero model calls. Past that line an issue must be under
 `freshness_cutoff_min` minutes old when Dibs first sees it, or it is recorded
-and dropped: an issue that has been open for hours has been seen by everyone.
+and dropped. In steady state this gate almost never fires, because the poller
+comes round every 45 seconds and sees issues that are seconds old. It matters
+after a gap, when the laptop was asleep and an hour of issues arrives at once.
 
 `SIGHUP` reloads both config files without a restart.
 
 ## What it costs
 
-The only recurring cost is the Anthropic API, and at four repositories it is
-about a dollar a month. `PLAN.md` has the arithmetic. The caps in `dibs.yaml`
-exist to bound a bug, not to manage a budget.
+The only recurring cost is the Anthropic API, and at four repositories it is a
+dollar or two a month. `PLAN.md` has the arithmetic. The caps in `dibs.yaml`
+exist to bound a bug, not to manage a budget, which is why `daily_call_cap` sits
+far above a normal day's traffic.
+
+Opening the junk floor costs nothing extra, because the floor is applied after
+scoring. The only change that adds model calls is letting assigned issues
+through the filter, and that is a handful a day.
+
+If the cap does trip, triage stops calling the model and stores each remaining
+issue at the middle score of 50 so it still reaches Slack. A capped day is a
+loud day, not a silent one.

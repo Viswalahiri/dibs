@@ -2,14 +2,13 @@
 // issues, before any model call, and every issue it rejects costs nothing.
 //
 // Everything here is a pure function of the issue and its fetched context, so
-// the whole stage is testable without a network or a database. Expect it to
-// remove 40 to 60% of volume. If it is removing much less than that, tighten
-// it before touching anything downstream, because it is the only lever whose
-// savings are free.
+// the whole stage is testable without a network or a database.
 //
 // Do not add checks beyond the ones below. The strainer rule is load-bearing:
 // a bad issue reaching Slack costs one click, a good issue killed here costs
-// the issue.
+// the issue. Every check that survives here rests on someone having acted, not
+// on a field having been set. An assignee is the case that taught us the
+// difference, and it is scored in triage now rather than killed here.
 package filter
 
 import (
@@ -127,9 +126,6 @@ func endsSentence(s string, i int) bool {
 // below, so the reason recorded is the most specific fact known about why the
 // issue is unavailable.
 func Apply(iss store.Issue, ctx gh.Context, cfg *config.Config) Result {
-	if len(iss.Assignees) > 0 {
-		return reject(store.ReasonAlreadyAssigned)
-	}
 	if ctx.HasLinkedPR {
 		return reject(store.ReasonLinkedPRExists)
 	}

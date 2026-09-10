@@ -102,7 +102,7 @@ func (r *Router) why(ctx context.Context, iss store.Issue, cb slack.InteractionC
 // minutes spent deciding, which on a busy repository is enough for someone else
 // to take it.
 func (r *Router) track(ctx context.Context, iss store.Issue, repo store.Repo, cb slack.InteractionCallback) error {
-	taken, why, err := StillAvailable(ctx, r.client, repo, iss.Number, r.cfg.Profile.GitHubLogin)
+	taken, why, err := StillAvailable(ctx, r.client, repo, iss.Number, r.cfg.Profile.GitHubLogin, iss.Assignees)
 	if err != nil {
 		return err
 	}

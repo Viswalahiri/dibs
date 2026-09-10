@@ -245,6 +245,72 @@ func TestACrashedWorkerLosesNoRow(t *testing.T) {
 
 // --- fixtures ---
 
+// The spend cap must never swallow an issue. Parking one until the window rolls
+// over surfaces it hours late, and hours late is the same as lost for a system
+// whose whole argument is being early.
+func TestTriageFailsOpenWhenTheSpendCapTrips(t *testing.T) {
+	start := time.Date(2026, 3, 2, 12, 0, 0, 0, time.UTC)
+	now := start
+	clock := func() time.Time { return now }
+
+	github := httptest.NewServer(githubFixture(t, start.Add(10*time.Second)))
+	defer github.Close()
+	anthropic := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("the model was called although the cap had already tripped")
+	}))
+	defer anthropic.Close()
+
+	cfg := testConfig()
+	cfg.Triage.DailyCallCap = 0
+	db := openStore(t)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+
+	if err := db.SyncRepos(ctx, []config.Repo{
+		{Slug: "acme/widget", Receptivity: config.ReceptivityNormal},
+	}, cfg.Polling.DefaultIntervalSec); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := db.RepoBySlug(ctx, "acme", "widget")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client := gh.New("token", 4, gh.WithBaseURL(github.URL))
+	poller := gh.NewPoller(client, db, cfg, log, nil, nil, gh.WithClock(clock))
+	if _, err := poller.Tick(ctx, repo.ID); err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	now = start.Add(time.Minute)
+	if _, err := poller.Tick(ctx, repo.ID); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if n, err := gh.NewEnricher(client, db, cfg, log).Drain(ctx); err != nil || n != 1 {
+		t.Fatalf("enrich: drained %d, err %v", n, err)
+	}
+
+	triager := triage.NewWorker(
+		triage.NewClient("key", cfg, triage.WithAPIBase(anthropic.URL)), db, cfg, log)
+	if n, err := triager.Drain(ctx); err != nil || n != 1 {
+		t.Fatalf("triage: drained %d, err %v", n, err)
+	}
+	assertState(t, ctx, db, repo.ID, store.StateScored, 1)
+
+	scored, err := db.StaleIssues(ctx, store.StateScored, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scored) != 1 {
+		t.Fatalf("want one scored issue, got %d", len(scored))
+	}
+	if got := scored[0].Score.Int64; got != 50 {
+		t.Errorf("capped issue scored %d, want the degraded 50", got)
+	}
+	if !strings.Contains(scored[0].TriageJSON, "degraded") {
+		t.Errorf("triage json %q does not record the degradation", scored[0].TriageJSON)
+	}
+}
+
 func testConfig() *config.Config {
 	return &config.Config{
 		Profile: config.Profile{

@@ -7,15 +7,15 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"strings"
 	"time"
-
-	"github.com/slack-go/slack"
 
 	"github.com/Viswalahiri/dibs/internal/config"
 	"github.com/Viswalahiri/dibs/internal/filter"
 	"github.com/Viswalahiri/dibs/internal/gh"
 	"github.com/Viswalahiri/dibs/internal/store"
 	"github.com/Viswalahiri/dibs/internal/triage"
+	"github.com/slack-go/slack"
 )
 
 const pushBatch = 5
@@ -109,7 +109,7 @@ func (p *Pusher) one(ctx context.Context, iss store.Issue) error {
 		return err
 	}
 
-	taken, why, err := StillAvailable(ctx, p.client, repo, iss.Number, p.cfg.Profile.GitHubLogin)
+	taken, why, err := StillAvailable(ctx, p.client, repo, iss.Number, p.cfg.Profile.GitHubLogin, iss.Assignees)
 	if err != nil {
 		return err
 	}
@@ -156,7 +156,13 @@ func (p *Pusher) one(ctx context.Context, iss store.Issue) error {
 //
 // It runs immediately before the push, and again when Track is pressed, which
 // covers the minutes spent deciding.
-func StillAvailable(ctx context.Context, client *gh.Client, repo store.Repo, number int, self string) (
+//
+// known is the assignee list dibs recorded when it scored the issue. Only a name
+// that was not there then counts as taken. An issue assigned before dibs ever
+// saw it was surfaced deliberately, because projects hand assignments out by bot
+// and by round-robin, and rejecting it here would quietly undo that one stage
+// later.
+func StillAvailable(ctx context.Context, client *gh.Client, repo store.Repo, number int, self string, known []string) (
 	taken bool, why string, err error) {
 
 	base := fmt.Sprintf("/repos/%s/%s/issues/%d",
@@ -166,7 +172,7 @@ func StillAvailable(ctx context.Context, client *gh.Client, repo store.Repo, num
 	if _, _, err := client.GetJSON(ctx, base, "", &current); err != nil {
 		return false, "", err
 	}
-	if current.IsAssigned() {
+	if newlyAssigned(current.AssigneeLogins(), known, self) {
 		return true, "assigned", nil
 	}
 	if current.State == "closed" {
@@ -232,4 +238,20 @@ func (r *Resurfacer) Run(ctx context.Context) error {
 			r.log.Info("resurfaced", "issue_id", iss.ID, "number", iss.Number)
 		}
 	}
+}
+
+// newlyAssigned reports whether anyone has taken the issue since dibs recorded
+// it. The operator's own name never counts: him holding it is the outcome this
+// system exists to produce.
+func newlyAssigned(current, known []string, self string) bool {
+	seen := map[string]bool{strings.ToLower(strings.TrimSpace(self)): true}
+	for _, k := range known {
+		seen[strings.ToLower(strings.TrimSpace(k))] = true
+	}
+	for _, c := range current {
+		if !seen[strings.ToLower(strings.TrimSpace(c))] {
+			return true
+		}
+	}
+	return false
 }
