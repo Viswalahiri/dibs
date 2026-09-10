@@ -7,9 +7,8 @@ is still possible.
 Dibs holds a read-only GitHub token and never writes to GitHub. Claiming
 happens in your browser, by hand.
 
-`PLAN.md` explains what it is and why it is shaped this way. `SPEC.md` is the
-build contract. `SETUP.md` is how to run it, written for someone who has not
-used Go before.
+`PLAN.md` explains what it is and why it is shaped this way. `SETUP.md` is how
+to run it, written for someone who has not used Go before.
 
 ## Status
 
