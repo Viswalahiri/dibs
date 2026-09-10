@@ -5,8 +5,9 @@ already spoken for, and pushes the rest to Slack fast enough that claiming one
 is still possible.
 
 This document explains what Dibs is and why it is shaped this way. It is for a
-human. The build instructions live in `SPEC.md`, which is what an implementing
-agent reads.
+human. The code is the description of how it works, and it is commented for
+that; what stays here is the reasoning that the code cannot show. `SETUP.md` is
+how to run it.
 
 ## What it is for
 
@@ -214,20 +215,53 @@ The rate-limit guard still exists, because a bug that starts requesting in a
 loop should slow down and then stop rather than get the token throttled. It
 bounds a mistake, not a budget.
 
-## Build order
+## What has to stay true
 
-Each milestone runs on its own and is useful on its own.
+These were the acceptance conditions while Dibs was being built. They outlived
+the milestones, because each one is a property a plausible change quietly
+breaks. Most are pinned by a test.
 
-**M1, poller.** Config, schema, GitHub client with ETags, waterline adoption,
-freshness cutoff, rate-limit guard. Prints new issues as JSON.
+**Adding a repo costs nothing.** Adoption issues one list request and zero
+enrichment requests, on first run and on every `SIGHUP` that adds a repo.
 
-**M2, filter.** Timeline, comments, deterministic rejection with full unit
-coverage, applied inside the enricher.
+**Screening an issue costs exactly two requests.** The timeline and the
+comments. A third request is something nothing reads, and `internal/app` fails
+the build if one appears.
 
-**M3, Slack.** Block Kit, outbox, sender, pre-push freshness re-check.
+**No issue is ever emitted twice.** A repeated page, a re-poll, and a retried
+lease are all no-ops.
 
-**M4, reaper and deployment.** Lease release, expiry, cadence recompute,
-dark-repo warning, systemd unit.
+**`kill -9` loses no row.** Every stage is safe to run twice, because a crash
+leaves a lease that expires and the row comes back round.
+
+**A sleep and wake cycle loses no queued message.** The outbox is durable and
+the sender flushes on start.
+
+**`SIGHUP` reloads the repo list without a restart,** and adopts anything new at
+its own waterline.
+
+**`--dry-run` runs the whole pipeline with no Slack token present.**
+
+The dependency list is closed: `slack-go`, `modernc.org/sqlite`, and `yaml.v3`.
+Everything else is the standard library, HTTP included. Adding a fourth needs a
+specific reason.
+
+## Failure modes
+
+The ones that shaped the code, and what each one does.
+
+| Failure | Handling |
+|---|---|
+| Pull requests returned by the issues endpoint | Check `pull_request` on every item. The most common bug in this pattern. |
+| Process killed mid-stage | The lease expires and the row is retried. |
+| Laptop sleeps | Gap warning, advance the waterline, no backfill. |
+| Clock jump after suspend | Never cache an absolute deadline. Read the clock fresh. |
+| Slack unreachable | The outbox row stays pending and the sender retries. |
+| Undecodable outbox payload | Mark it sent and drop it. It will never become readable. |
+| Duplicate warning messages | The unique index on `outbox.dedupe_key`. |
+| Secondary rate limit | Honour `Retry-After` and cap concurrency. Concurrency is punished harder than volume. |
+| A non-core rate-limit bucket reads low | Record only the core resource. Search never pauses the poller. |
+| A repo goes dark from a label bot | The reaper warns above 90% rejection over 7 days. |
 
 ## What Dibs will not do
 

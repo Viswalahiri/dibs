@@ -8,13 +8,19 @@ define copy_once
 	if [ -e $(2) ]; then echo "keeping  $(2)"; else cp $(1) $(2); echo "created  $(2)"; fi
 endef
 
-.PHONY: build test lint setup install cross service logs clean
+.PHONY: build test e2e lint setup install cross service logs clean
 
 build:
 	$(GO) build -o bin/dibs ./cmd/dibs
 
 test:
 	$(GO) test ./...
+
+# e2e drives the whole pipeline against a stub GitHub and prints the alerts and
+# final issue states. Deterministic, so two runs either side of a change diff to
+# nothing. Needs no token and makes no network calls.
+e2e:
+	@hack/e2e.sh
 
 lint:
 	$(GO) vet ./...

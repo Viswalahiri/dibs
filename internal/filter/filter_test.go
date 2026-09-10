@@ -28,7 +28,7 @@ func issue(mut ...func(*store.Issue)) store.Issue {
 }
 
 func comment(login, body string) Comment {
-	return Comment{Login: login, Assoc: "NONE", Body: body}
+	return Comment{Login: login, Body: body}
 }
 
 func TestApplyPasses(t *testing.T) {

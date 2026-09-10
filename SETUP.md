@@ -198,6 +198,36 @@ To start completely over, delete `~/.local/share/dibs/dibs.db`. The next run
 re-adopts every repository at a fresh waterline and surfaces none of what is
 already open, so this is safe to do at any time.
 
+## Upgrading a database from before the column cleanup
+
+Two columns Dibs never read, `node_id` and `author_assoc`, came out of the
+`issues` table. An existing database still has them, and because they are
+declared `NOT NULL` with no default, the first new issue Dibs tries to record
+fails with `NOT NULL constraint failed: issues.node_id`. Reports keep working
+until then, so you may not notice straight away.
+
+Stop the service and drop the two columns. This keeps every row, which matters
+because the reaper reads the last thirty days of issues to set each
+repository's polling rate:
+
+```bash
+systemctl --user stop dibs
+python3 - ~/.local/share/dibs/dibs.db <<'EOF'
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.executescript("""
+ALTER TABLE issues DROP COLUMN node_id;
+ALTER TABLE issues DROP COLUMN author_assoc;
+""")
+db.commit()
+EOF
+systemctl --user start dibs
+```
+
+Deleting the database instead also works and is safe, but you lose the issue
+history the polling rate is derived from, so every repository sits at the
+default interval for a week afterwards.
+
 ## Upgrading from the scoring version
 
 The schema changed and there is no migration. Stop the service, delete the

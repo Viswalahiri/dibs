@@ -91,7 +91,6 @@ type harness struct {
 	store  *store.Store
 	gh     *fakeGitHub
 	repo   store.Repo
-	sunk   []store.Issue
 	warns  []string
 	now    time.Time
 }
@@ -127,7 +126,6 @@ func newHarness(t *testing.T) *harness {
 	client := New("t", 4, WithBaseURL(srv.URL), WithSleep(func(context.Context, time.Duration) error { return nil }))
 	h.poller = NewPoller(client, st, cfg,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		func(_ store.Repo, iss store.Issue) { h.sunk = append(h.sunk, iss) },
 		func(kind, msg string) { h.warns = append(h.warns, kind+": "+msg) },
 		WithClock(func() time.Time { return h.now }),
 	)
@@ -162,6 +160,31 @@ func (h *harness) reload(t *testing.T) {
 	h.repo = repo
 }
 
+// queued returns the issue numbers sitting in `new`, which is where the poller
+// hands work to the enricher. The database is the only handoff between the two,
+// so this is what "the poller emitted it" means.
+func (h *harness) queued(t *testing.T) []int {
+	t.Helper()
+	rows, err := h.store.DB().Query(
+		`SELECT number FROM issues WHERE state = ? ORDER BY number`, string(store.StateNew))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []int
+	for rows.Next() {
+		var n int
+		if err := rows.Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, n)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
 func (h *harness) states(t *testing.T) map[store.State]int {
 	t.Helper()
 	counts, err := h.store.CountByState(context.Background(), h.repo.ID)
@@ -173,8 +196,8 @@ func (h *harness) states(t *testing.T) map[store.State]int {
 
 func issue(number int, created time.Time) Issue {
 	return Issue{
-		Number: number, NodeID: "n", Title: "issue", HTMLURL: "https://example.invalid",
-		State: "open", CreatedAt: created, AuthorAssociation: "NONE",
+		Number: number, Title: "issue", HTMLURL: "https://example.invalid",
+		State: "open", CreatedAt: created,
 		User: &User{Login: "someone"},
 	}
 }
@@ -202,8 +225,8 @@ func TestAdoptionBaselinesEverythingAndSpendsNothing(t *testing.T) {
 	if got := h.states(t); got[store.StateBaseline] != 3 || got[store.StateNew] != 0 {
 		t.Errorf("states = %v, want 3 baseline and 0 new", got)
 	}
-	if len(h.sunk) != 0 {
-		t.Errorf("adoption emitted %d issues; it must emit none", len(h.sunk))
+	if got := h.queued(t); len(got) != 0 {
+		t.Errorf("adoption queued %v; it must queue nothing", got)
 	}
 	if !h.repo.Adopted() {
 		t.Error("adopted_at was not set")
@@ -246,8 +269,8 @@ func TestNewIssueAfterAdoptionIsEmittedOnce(t *testing.T) {
 	h.tick(t)
 	h.reload(t)
 
-	if len(h.sunk) != 1 || h.sunk[0].Number != 2 {
-		t.Fatalf("emitted %+v, want just issue 2", h.sunk)
+	if got := h.queued(t); len(got) != 1 || got[0] != 2 {
+		t.Fatalf("queued %v, want just issue 2", got)
 	}
 	if got := h.states(t); got[store.StateNew] != 1 {
 		t.Errorf("states = %v, want 1 new", got)
@@ -257,8 +280,8 @@ func TestNewIssueAfterAdoptionIsEmittedOnce(t *testing.T) {
 	h.now = h.now.Add(time.Minute)
 	h.gh.set(`W/"3"`, issue(2, h.now.Add(-90*time.Second)), issue(1, h.now.Add(-2*time.Hour)))
 	h.tick(t)
-	if len(h.sunk) != 1 {
-		t.Errorf("issue 2 was emitted %d times, want once", len(h.sunk))
+	if got := h.queued(t); len(got) != 1 {
+		t.Errorf("issue 2 is queued %v, want once", got)
 	}
 }
 
@@ -284,8 +307,8 @@ func TestStaleIssueIsAgedOutAndNeverEmitted(t *testing.T) {
 	if counts[store.StateNew] != 1 {
 		t.Errorf("new rows = %d, want 1", counts[store.StateNew])
 	}
-	if len(h.sunk) != 1 || h.sunk[0].Number != 2 {
-		t.Fatalf("emitted %+v, want only the fresh issue 2", h.sunk)
+	if got := h.queued(t); len(got) != 1 || got[0] != 2 {
+		t.Fatalf("queued %v, want only the fresh issue 2", got)
 	}
 }
 
@@ -299,8 +322,8 @@ func TestPullRequestsAreNeverTreatedAsIssues(t *testing.T) {
 	h.gh.set(`W/"2"`, pullRequest(2, h.now.Add(-time.Minute)))
 	h.tick(t)
 
-	if len(h.sunk) != 0 {
-		t.Errorf("a pull request was emitted as an issue: %+v", h.sunk)
+	if got := h.queued(t); len(got) != 0 {
+		t.Errorf("a pull request was queued as an issue: %v", got)
 	}
 	if got := h.states(t); got[store.StateNew] != 0 {
 		t.Errorf("states = %v, want no new rows", got)
@@ -324,8 +347,8 @@ func TestIssueCreatedOnTheWaterlineSecondIsNotLost(t *testing.T) {
 	h.gh.set(`W/"2"`, issue(2, waterline), issue(1, waterline))
 	h.tick(t)
 
-	if len(h.sunk) != 1 || h.sunk[0].Number != 2 {
-		t.Fatalf("emitted %+v, want issue 2; it shares a second with the waterline", h.sunk)
+	if got := h.queued(t); len(got) != 1 || got[0] != 2 {
+		t.Fatalf("queued %v, want issue 2; it shares a second with the waterline", got)
 	}
 }
 
@@ -347,8 +370,8 @@ func TestNotModifiedCostsNothingAndKeepsState(t *testing.T) {
 	h.tick(t) // second poll, served as 304
 	h.reload(t)
 
-	if len(h.sunk) != 0 {
-		t.Errorf("a 304 emitted %d issues", len(h.sunk))
+	if got := h.queued(t); len(got) != 0 {
+		t.Errorf("a 304 queued %v", got)
 	}
 	if !h.repo.WaterlineAt.Equal(before) {
 		t.Errorf("waterline moved on a 304: %v -> %v", before, h.repo.WaterlineAt)

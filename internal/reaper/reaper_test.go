@@ -211,10 +211,10 @@ func newReaper(t *testing.T, mut ...func(*config.Config)) (*Reaper, *store.Store
 func seedIssue(t *testing.T, db *store.Store, repoID int64, number int, state store.State, firstSeen time.Time) int64 {
 	t.Helper()
 	res, err := db.DB().Exec(`
-		INSERT INTO issues (repo_id, number, node_id, title, body, html_url, author,
-		                    author_assoc, created_at, first_seen_at, state)
-		VALUES (?, ?, ?, ?, 'body', ?, 'reporter', 'NONE', ?, ?, ?)`,
-		repoID, number, fmt.Sprintf("I_%d", number), fmt.Sprintf("issue %d", number),
+		INSERT INTO issues (repo_id, number, title, body, html_url, author,
+		                    created_at, first_seen_at, state)
+		VALUES (?, ?, ?, 'body', ?, 'reporter', ?, ?, ?)`,
+		repoID, number, fmt.Sprintf("issue %d", number),
 		fmt.Sprintf("https://github.com/acme/widget/issues/%d", number),
 		firstSeen.Unix(), firstSeen.Unix(), string(state))
 	if err != nil {

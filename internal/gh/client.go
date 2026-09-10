@@ -44,7 +44,6 @@ const (
 type Response struct {
 	Body        []byte
 	ETag        string
-	Status      int
 	NotModified bool
 }
 
@@ -83,7 +82,6 @@ type Client struct {
 
 	mu        sync.RWMutex
 	remaining int
-	limit     int
 	resetAt   time.Time
 }
 
@@ -123,12 +121,8 @@ func (c *Client) Budget() (remaining int, resetAt time.Time) {
 	return c.remaining, c.resetAt
 }
 
-// Get performs a conditional GET, retrying transient failures. Pass a non-empty
-// etag to send If-None-Match.
-func (c *Client) Get(ctx context.Context, path, etag string) (Response, error) {
-	return c.get(ctx, path, etag, defaultAccept)
-}
-
+// get performs a conditional GET, retrying transient failures. A non-empty etag
+// is sent as If-None-Match.
 func (c *Client) get(ctx context.Context, path, etag, accept string) (Response, error) {
 	const maxServerErrorAttempts = 3
 	serverErrors := 0
@@ -224,7 +218,7 @@ func (c *Client) attempt(ctx context.Context, path, etag, accept string) (Respon
 	// A 304 costs no quota. It is the reason this cadence is affordable.
 	if httpResp.StatusCode == http.StatusNotModified {
 		io.Copy(io.Discard, httpResp.Body)
-		return Response{Status: httpResp.StatusCode, NotModified: true, ETag: etag}, nil, nil
+		return Response{NotModified: true, ETag: etag}, nil, nil
 	}
 
 	body, readErr := io.ReadAll(httpResp.Body)
@@ -238,9 +232,8 @@ func (c *Client) attempt(ctx context.Context, path, etag, accept string) (Respon
 	switch {
 	case httpResp.StatusCode >= 200 && httpResp.StatusCode < 300:
 		return Response{
-			Body:   body,
-			ETag:   httpResp.Header.Get("ETag"),
-			Status: httpResp.StatusCode,
+			Body: body,
+			ETag: httpResp.Header.Get("ETag"),
 		}, nil, nil
 
 	case httpResp.StatusCode >= 500:
@@ -321,7 +314,6 @@ func (c *Client) recordBudget(h http.Header) {
 		return
 	}
 	remaining, okRemaining := headerInt(h, "X-RateLimit-Remaining")
-	limit, okLimit := headerInt(h, "X-RateLimit-Limit")
 	reset, okReset := headerInt(h, "X-RateLimit-Reset")
 	if !okRemaining && !okReset {
 		return
@@ -330,9 +322,6 @@ func (c *Client) recordBudget(h http.Header) {
 	defer c.mu.Unlock()
 	if okRemaining {
 		c.remaining = remaining
-	}
-	if okLimit {
-		c.limit = limit
 	}
 	if okReset {
 		c.resetAt = time.Unix(int64(reset), 0).UTC()
