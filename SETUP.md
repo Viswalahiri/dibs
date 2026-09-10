@@ -153,6 +153,56 @@ systemctl --user restart dibs      # after editing dibs.yaml
 kill -HUP $(pgrep -f 'dibs run')   # after editing repos.yaml only, no restart
 ```
 
+## 8. Stop the laptop sleeping through the good issues
+
+Dibs runs on your machine, so it stops when your machine does. Nothing here is
+required and nothing in Dibs depends on it working. Missing an hour costs you
+that hour's issues, which were going stale anyway, and Dibs reports the gap in
+Slack when it happens.
+
+Ubuntu suspends when the lid closes. In `/etc/systemd/logind.conf`:
+
+```
+HandleLidSwitch=ignore
+HandleLidSwitchDocked=ignore
+HandleLidSwitchExternalPower=ignore
+```
+
+Then `sudo systemctl restart systemd-logind`. Save your work first, because on
+some Ubuntu versions that restarts the graphical session.
+
+GNOME suspends on inactivity separately from the lid:
+
+```bash
+gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing'
+gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-type 'suspend'
+```
+
+Leaving the battery case alone is deliberate. On battery the machine should
+sleep.
+
+If gap warnings show up in Slack several times a week anyway, the laptop is
+costing you the thing you care most about, and it is time to move Dibs to a
+small VPS. `make cross` builds the binary for that. Moving is an `scp` and a
+`systemctl enable`, because the whole system is one static binary and one
+SQLite file.
+
+## Building a corpus to calibrate against
+
+A week of live running produces a handful of scored issues, which is not much
+to set the junk floor against. `dibs backfill` scores a repository's recent
+history into the same database and notifies nobody:
+
+```bash
+./bin/dibs backfill owner/repo --since 720h
+./bin/dibs replay
+```
+
+It stops at the daily call cap and picks up where it left off next time. Those
+scores are indicative rather than a replay of what would have been pushed,
+because an issue is scored as it stands today rather than as it stood in the
+minute it was opened.
+
 ## Where everything lives
 
 | Path | What |

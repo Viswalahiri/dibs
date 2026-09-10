@@ -8,7 +8,7 @@ define copy_once
 	if [ -e $(2) ]; then echo "keeping  $(2)"; else cp $(1) $(2); echo "created  $(2)"; fi
 endef
 
-.PHONY: build test lint eval setup install service logs clean
+.PHONY: build test lint eval setup install cross service logs clean
 
 build:
 	$(GO) build -o bin/dibs ./cmd/dibs
@@ -25,6 +25,13 @@ lint:
 # reason unrelated to the code.
 eval:
 	$(GO) test -tags eval -run TestEval ./internal/triage/...
+
+# cross builds for a VPS. The driver is pure Go, so a static binary needs no
+# toolchain on the far end: moving dibs is an scp and a systemctl enable.
+cross:
+	@mkdir -p bin
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -o bin/dibs-linux-amd64 ./cmd/dibs
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -o bin/dibs-linux-arm64 ./cmd/dibs
 
 # setup puts the config files where dibs looks for them. It never overwrites
 # anything you have already edited, so it is safe to run again.

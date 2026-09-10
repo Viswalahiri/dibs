@@ -30,6 +30,13 @@ const (
 	StateClaimedBeforePush State = "claimed_before_push"
 
 	StateExpired State = "expired" // aged out of scored or snoozed
+
+	// StateBackfilled came from `dibs backfill` rather than the poller. It is
+	// scored for calibration and never surfaced, which is why it is terminal
+	// and why no worker claims it. A backfilled row still carries the
+	// RejectReason the filter or the floor would have given it, so the corpus
+	// records what would have happened as well as the score.
+	StateBackfilled State = "backfilled"
 )
 
 // RejectReason explains a StateRejected row. Every rejection carries one.
@@ -64,6 +71,7 @@ var transitions = map[State][]State{
 	StateAgedOut:           {},
 	StateClaimedBeforePush: {},
 	StateExpired:           {},
+	StateBackfilled:        {},
 }
 
 // claimable states are the ones a worker leases rows from. Anything else is

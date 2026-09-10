@@ -16,6 +16,16 @@ import (
 	"github.com/Viswalahiri/dibs/internal/triage"
 )
 
+// Conversation is the part of Slack the router talks back to. Slack is the
+// only implementation; the interface exists so a button press can be exercised
+// without a workspace, which is where the two rules that matter live: Track
+// refuses an issue taken while you were deciding, and a double tap changes
+// nothing.
+type Conversation interface {
+	Update(ctx context.Context, channel, timestamp, text string, blocks []slack.Block) error
+	Reply(ctx context.Context, channel, timestamp string, blocks []slack.Block) error
+}
+
 // Router handles button presses. Every handler mutates local SQLite and
 // nothing else. Dibs holds a read-only GitHub token; claiming happens in the
 // browser, by hand.
@@ -26,13 +36,13 @@ import (
 type Router struct {
 	store  *store.Store
 	client *gh.Client
-	slack  *Slack
+	slack  Conversation
 	cfg    *config.Config
 	log    *slog.Logger
 	now    func() time.Time
 }
 
-func NewRouter(s *store.Store, client *gh.Client, sl *Slack, cfg *config.Config, log *slog.Logger) *Router {
+func NewRouter(s *store.Store, client *gh.Client, sl Conversation, cfg *config.Config, log *slog.Logger) *Router {
 	return &Router{
 		store: s, client: client, slack: sl, cfg: cfg, log: log,
 		now: func() time.Time { return time.Now().UTC() },

@@ -242,39 +242,16 @@ func (e *Enricher) Enrich(ctx context.Context, repo store.Repo, iss store.Issue)
 	return out, nil
 }
 
-// timelineEvent is the subset of the timeline payload that reveals a linked
-// pull request. GitHub reports the link from the issue's side as a
-// cross-referenced or connected event whose source is a pull request.
-type timelineEvent struct {
-	Event  string `json:"event"`
-	Source *struct {
-		Issue *struct {
-			State       string          `json:"state"`
-			PullRequest *PullRequestRef `json:"pull_request"`
-		} `json:"issue"`
-	} `json:"source"`
-}
-
+// hasLinkedPR reports whether an open pull request already points at the
+// issue. Only an open one means the work is genuinely under way; a closed one
+// is usually an abandoned attempt, which leaves the issue available.
 func (e *Enricher) hasLinkedPR(ctx context.Context, repo store.Repo, number int) (bool, error) {
-	path := fmt.Sprintf("/repos/%s/%s/issues/%d/timeline?per_page=100",
-		url.PathEscape(repo.Owner), url.PathEscape(repo.Name), number)
-
-	var events []timelineEvent
-	if _, _, err := e.client.getJSON(ctx, path, "", timelineAccept, &events); err != nil {
-		if notFound(err) {
-			return false, nil
-		}
+	prs, err := e.client.LinkedPRs(ctx, repo.Owner, repo.Name, number)
+	if err != nil {
 		return false, err
 	}
-	for _, ev := range events {
-		if ev.Event != "cross-referenced" && ev.Event != "connected" {
-			continue
-		}
-		// Only an open pull request means the work is genuinely under way. A
-		// closed one is usually an abandoned attempt, which leaves the issue
-		// available.
-		if ev.Source != nil && ev.Source.Issue != nil &&
-			ev.Source.Issue.PullRequest != nil && ev.Source.Issue.State == "open" {
+	for _, pr := range prs {
+		if pr.Open {
 			return true, nil
 		}
 	}

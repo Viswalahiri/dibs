@@ -107,7 +107,8 @@ func formatCounts(counts map[store.State]int) string {
 	order := []store.State{
 		store.StateBaseline, store.StateNew, store.StateEnriched, store.StateScored,
 		store.StatePushed, store.StateTracked, store.StateSkipped, store.StateSnoozed,
-		store.StateRejected, store.StateAgedOut, store.StateClaimedBeforePush, store.StateExpired,
+		store.StateRejected, store.StateAgedOut, store.StateClaimedBeforePush,
+		store.StateExpired, store.StateBackfilled,
 	}
 	out := ""
 	for _, st := range order {

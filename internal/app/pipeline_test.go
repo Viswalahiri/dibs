@@ -187,6 +187,62 @@ func TestPipelineDropsAClaimedIssueBeforePushing(t *testing.T) {
 	}
 }
 
+// TestACrashedWorkerLosesNoRow is the acceptance sentence for running on a
+// laptop: a worker killed mid-enrichment leaves a leased row behind, and the
+// issue completes on the next lease cycle rather than disappearing.
+func TestACrashedWorkerLosesNoRow(t *testing.T) {
+	start := time.Date(2026, 3, 2, 12, 0, 0, 0, time.UTC)
+	now := start
+
+	github := httptest.NewServer(githubFixture(t, start.Add(10*time.Second)))
+	defer github.Close()
+
+	cfg := testConfig()
+	db := openStore(t)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+
+	if err := db.SyncRepos(ctx, []config.Repo{{Slug: "acme/widget"}}, 45); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := db.RepoBySlug(ctx, "acme", "widget")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client := gh.New("token", 4, gh.WithBaseURL(github.URL))
+	poller := gh.NewPoller(client, db, cfg, log, nil, nil,
+		gh.WithClock(func() time.Time { return now }))
+	if _, err := poller.Tick(ctx, repo.ID); err != nil {
+		t.Fatal(err)
+	}
+	now = start.Add(time.Minute)
+	if _, err := poller.Tick(ctx, repo.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertState(t, ctx, db, repo.ID, store.StateNew, 1)
+
+	// The worker that took this row is gone. Nothing wrote the enrichment, and
+	// nothing will: only the lease it left behind says the row was ever taken.
+	dead := time.Now().UTC().Add(-2 * time.Hour)
+	claimed, err := db.Claim(ctx, store.StateNew, 5, "worker-that-died", cfg.Reaper.LeaseTTL(), dead)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claimed %d rows, err %v", len(claimed), err)
+	}
+	assertState(t, ctx, db, repo.ID, store.StateNew, 1)
+
+	// A reaper pass finds the abandoned lease. The row is claimable either way,
+	// but this is the path a restart actually takes.
+	if n, err := db.ReleaseExpiredLeases(ctx, time.Now().UTC()); err != nil || n != 1 {
+		t.Fatalf("released %d leases, err %v", n, err)
+	}
+
+	if n, err := gh.NewEnricher(client, db, cfg, log).Drain(ctx); err != nil || n != 1 {
+		t.Fatalf("the replacement worker enriched %d rows, err %v", n, err)
+	}
+	assertState(t, ctx, db, repo.ID, store.StateEnriched, 1)
+}
+
 // --- fixtures ---
 
 func testConfig() *config.Config {
