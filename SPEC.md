@@ -110,8 +110,8 @@ profile:
   timezone: America/New_York
 
 scoring:
-  junk_floor: 40               # below this, stored but never pushed
-  veto_confidence: 0.60        # below this a veto becomes a -10 penalty
+  junk_floor: 0                # below this, stored but never pushed; 0 pushes everything
+  veto_confidence: 1.00        # a veto kills only above this; 1.00 makes every veto a -10 penalty
   weights:                     # equal until replay data says otherwise
     scope_clarity: 20
     concreteness: 20
@@ -129,7 +129,7 @@ polling:
   default_interval_sec: 45
   min_interval_sec: 30
   max_concurrent: 4
-  freshness_cutoff_min: 15     # older than this at first sight: dropped free
+  freshness_cutoff_min: 60     # older than this at first sight: dropped free
   gap_warn_min: 15             # poll gap that triggers one Slack warning
   rate_limit_slow_at: 500
   rate_limit_pause_at: 100
@@ -142,11 +142,11 @@ triage:
   max_doc_chars: 1500
   max_retries: 2
   timeout_sec: 45
-  daily_call_cap: 100
+  daily_call_cap: 400
   cost:
     input_per_mtok_usd: 2.00   # Sonnet 5 rates
     output_per_mtok_usd: 10.00
-    monthly_budget_usd: 10.00
+    monthly_budget_usd: 25.00
 
 slack:
   deliver_to: dm               # "dm" or a channel ID
@@ -310,6 +310,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_outbox_dedupe
 `claimed_in_thread`, `too_thin`, `veto_self_fixing`, `veto_already_taken`,
 `veto_poorly_scoped`, `below_floor`.
 
+`already_assigned` is retained for rows written before assignment became a score
+penalty. Nothing produces it now.
+
 ## 7. Pipeline
 
 Workers are independent goroutines. They never talk to each other. Each polls
@@ -425,7 +428,6 @@ Reject if any of:
 
 | Check | Reason |
 |---|---|
-| `assignee != nil` or `len(assignees) > 0` | `already_assigned` |
 | `ctx.HasLinkedPR` | `linked_pr_exists` |
 | Labels intersect the killfile | `killfile_label` |
 | A comment by anyone other than `profile.github_login` matches the claim regex | `claimed_in_thread` |
@@ -441,6 +443,17 @@ find, and many repos apply `needs-triage` to every issue automatically.
 `question`, `discussion`, and `rfc` are also absent from the killfile. They
 apply a `-10` score penalty each in `score.go` instead.
 
+An assignee is not a rejection either. Projects hand assignments out by
+round-robin, by CODEOWNERS, and by bot, so an assigned issue with no other
+activity is usually still open in practice, and killing on the field costs real
+issues. `score.go` applies a `-10` penalty instead, and the model is shown the
+assignee list so its `already_taken` veto can weigh it. The strong signals stay
+here: a linked pull request, and a person saying in the thread that they have
+taken it.
+
+`already_assigned` remains a valid `reject_reason` because rows recorded before
+this change still carry it. Nothing produces it now.
+
 Strip fenced code blocks and blockquotes from comment bodies before running the
 claim regex, so an issue quoting the phrase "working on this" is not rejected.
 
@@ -450,8 +463,8 @@ var claimRe = regexp.MustCompile(`(?i)\b(i'?ll take (this|it)|i am taking|taking
     `i have a (patch|fix)|opened a pr|submitted a pr|will submit)\b`)
 ```
 
-Expect this stage to remove 40 to 60% of volume at zero cost. Do not add checks
-beyond this list.
+Every check here rests on somebody having acted, not on a field having been
+set. Do not add checks beyond this list.
 
 ## 8. GitHub client
 
@@ -534,7 +547,13 @@ On terminal failure, set `state = 'scored'` with `score = 50` and a
 `triage_json` marked degraded. **Fail open.** A model outage must never silently
 swallow issues.
 
-Enforce `daily_call_cap`. On breach, log at error level, enqueue one Slack
+Enforce `daily_call_cap`. On breach the worker fails open: it stops calling the
+model and stores the issue at the degraded score of 50, exactly as a model
+outage does. Parking the row until the window rolls over would surface it hours
+late, which for this system is indistinguishable from losing it. The cap still
+bounds spend, because no further call is made.
+
+On breach, log at error level, enqueue one Slack
 warning, and stop triaging until the next local midnight. Enforce
 `monthly_budget_usd` the same way at 80% (warn) and 100% (stop), computed by
 summing `triage_runs` for the calendar month against the configured rates. Both
@@ -571,8 +590,14 @@ penalty rather than a kill, which is the right outcome for an ambiguous case.
                   this repository, raise confidence.
 
   already_taken   Someone other than the contributor has claimed this in the
-                  comments, or the issue is assigned, or a linked pull request
-                  already exists.
+                  comments, or a maintainer has said it is spoken for.
+
+                  An assignee alone is not a claim. Many projects assign
+                  automatically, by round-robin, by CODEOWNERS, or by a bot, and
+                  an assigned issue with no other activity is usually still open
+                  in practice. Raise confidence when the assignee has also
+                  commented, or when the thread shows work under way. Otherwise
+                  leave it low and let the score carry the doubt.
 
   poorly_scoped   There is no way to tell what "done" looks like. No
                   reproduction, no expected behaviour, no acceptance criteria,
@@ -684,8 +709,12 @@ func Composite(t Response, iss Issue, repo Repo, cfg Config) (
 ```
 
 ```
-1. Hard veto: for each of the three, if confidence >= veto_confidence,
+1. Hard veto: for each of the three, if confidence > veto_confidence,
    return 0, true, "veto_<name>".
+
+   The comparison is exclusive so that a veto_confidence of 1.00 disables
+   killing entirely: no confidence can exceed 1.00, so every veto lands as the
+   penalty in step 5 instead. That is the shipped default.
 
 2. Weighted base, weights summing to 100, each dimension 1..5:
      base  = Σ (weight_i × score_i)      // 100..500
@@ -698,13 +727,16 @@ func Composite(t Response, iss Issue, repo Repo, cfg Config) (
 
 4. Receptivity multiplier: score *= receptivity_<repo.receptivity>
 
-5. Soft-veto penalty: for each veto with 0.35 <= confidence < veto_confidence,
+5. Soft-veto penalty: for each veto with 0.35 <= confidence <= veto_confidence,
    score -= 10.
 
 6. Label penalty: -10 for each of question, discussion, rfc present on the
    issue.
 
-7. Clamp to [0, 100], round to nearest int.
+7. Assignee penalty: -10 once if anyone other than profile.github_login holds
+   the assignment. His own assignment costs nothing.
+
+8. Clamp to [0, 100], round to nearest int.
 ```
 
 Routing:
@@ -745,9 +777,17 @@ deduplication rather than application code.
 
 Claims rows in `scored`. For each, in order:
 
-1. **Re-check freshness.** `GET /repos/{o}/{n}/issues/{num}`. If it is now
-   assigned, closed, or a new comment matches the claim regex, set
-   `state = 'claimed_before_push'` and stop. Do not notify.
+1. **Re-check freshness.** `GET /repos/{o}/{n}/issues/{num}`. If it has picked
+   up an assignee it did not carry when dibs scored it, or is closed, or a new
+   comment matches the claim regex, set `state = 'claimed_before_push'` and
+   stop. Do not notify.
+
+   The comparison is against the recorded assignee list, not against emptiness.
+   An issue that was already assigned when the filter passed it was surfaced on
+   purpose, and rejecting it here would undo that decision one stage later.
+   `profile.github_login` never counts as a new assignee: him taking the issue
+   is the outcome. A name that arrived during the window is a real claim, which
+   is why the change is watched rather than the field.
 2. Build the Block Kit message and enqueue it to `outbox`.
 3. Set `state = 'pushed'`, `surfaced_at = now`.
 
@@ -786,7 +826,7 @@ There is no cap on push volume.
 
 | Action | Behaviour |
 |---|---|
-| `dibs_track` | Re-fetch assignee and timeline first. If it has since been assigned or a PR appeared, replace the message with a warning and do not track. Otherwise insert into `tracked`, set `state = 'tracked'`, `decided_at = now`, and update the message to a compact tracked state. |
+| `dibs_track` | Re-fetch assignee and timeline first. If an assignee arrived that the issue did not carry when it was scored, or a PR appeared, replace the message with a warning and do not track. Otherwise insert into `tracked`, set `state = 'tracked'`, `decided_at = now`, and update the message to a compact tracked state. |
 | `dibs_skip` | `state = 'skipped'`, `decided_at = now`, collapse the message to one grey line. Keep the score for calibration. |
 | `dibs_snooze` | `state = 'snoozed'`, `decided_at = now`, requeue for +1h. On resurfacing, re-run the deterministic filter and the pre-push freshness check first. Most snoozed issues get claimed within the hour and should die silently. |
 | `dibs_why` | Post the stored dimension breakdown as a threaded reply: each dimension with its score and `why`, plus all three veto confidences. Reads `triage_json`. Never re-calls the model. |
@@ -839,10 +879,10 @@ past the cutoff lands in `aged_out` without any follow-up request.
 **M2, filter.** Timeline, comments, doc cache, author stats, deterministic
 rejection.
 
-*Accepts when:* 40 to 60% of new issues are rejected before any model call;
-every rejection carries a `reject_reason`; each killfile label and each claim
-regex alternative has a passing test; an issue quoting "working on this" inside
-a fenced code block is not rejected.
+*Accepts when:* every rejection carries a `reject_reason`; each killfile label
+and each claim regex alternative has a passing test; an issue quoting "working
+on this" inside a fenced code block is not rejected; an assigned issue with no
+other activity survives both the filter and the pre-push re-check.
 
 **M3, triage and Slack.** Claude integration with structured outputs, composite
 scoring, `dibs replay`, Socket Mode, Block Kit, router, outbox, pre-push
@@ -851,8 +891,8 @@ freshness re-check.
 *Accepts when:* 100 issues score without a schema-validation failure; token
 usage is recorded per run; the degraded fallback path works against a bad API
 key; a sleep and wake cycle loses no queued message; double-tapping every button
-is a no-op; Track refuses an issue assigned between push and click; an issue
-assigned between scoring and push lands in `claimed_before_push` with no Slack
+is a no-op; Track refuses an issue newly assigned between push and click; an
+issue newly assigned between scoring and push lands in `claimed_before_push` with no Slack
 message.
 
 **M4, calibration.** Run for a week. Use `dibs replay` and
@@ -979,4 +1019,4 @@ recovered.
 | Secondary rate limit | Honour `Retry-After`, cap concurrency at `max_concurrent`. Concurrency is punished harder than volume. |
 | A repo goes dark from a label bot | `dibs status --repos` shows the histogram; reaper warns above 90% rejection over 7 days |
 | Model scores everything high | The `why`-length check, plus the median-over-75 warning |
-| Alert fatigue | Log the skip rate daily. Above 50%, raise `junk_floor`. |
+| Alert fatigue | Log the skip rate daily. Above 50% with a floor set, warn to raise `junk_floor`. At a floor of zero the rate is the operator's own choice, so it stays a log line. |
