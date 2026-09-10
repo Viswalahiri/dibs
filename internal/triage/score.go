@@ -12,6 +12,10 @@ import (
 // model is not claiming anything, so nothing is deducted. Between it and the
 // configured threshold the model is hedging, and hedging is worth a penalty
 // rather than a kill.
+//
+// The threshold is exclusive, so a veto kills only when it is more confident
+// than the configured number. That is what makes scoring.veto_confidence of
+// 1.0 mean "never kill, only penalise": no confidence can exceed 1.0.
 const softVetoFloor = 0.35
 
 // softVetoPenalty, labelPenalty, and assigneePenalty are flat deductions. All
@@ -51,7 +55,7 @@ func Composite(r Response, iss store.Issue, repo store.Repo, cfg *config.Config)
 	score int, rejected bool, reason store.RejectReason) {
 
 	for _, v := range r.Vetoes.Each() {
-		if v.Veto.Confidence >= cfg.Scoring.VetoConfidence {
+		if v.Veto.Confidence > cfg.Scoring.VetoConfidence {
 			return 0, true, vetoReasons[v.Name]
 		}
 	}
@@ -79,7 +83,7 @@ func Composite(r Response, iss store.Issue, repo store.Repo, cfg *config.Config)
 	out *= cfg.Scoring.Multipliers.For(repo.Receptivity)
 
 	for _, v := range r.Vetoes.Each() {
-		if v.Veto.Confidence >= softVetoFloor && v.Veto.Confidence < cfg.Scoring.VetoConfidence {
+		if v.Veto.Confidence >= softVetoFloor && v.Veto.Confidence <= cfg.Scoring.VetoConfidence {
 			out -= softVetoPenalty
 		}
 	}

@@ -137,7 +137,10 @@ func newHarness(t *testing.T) *harness {
 func writeConfig(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "dibs.yaml")
-	if err := os.WriteFile(path, []byte("profile:\n  github_login: test-user\n"), 0o600); err != nil {
+	// The cutoff is pinned rather than inherited, because these tests are about
+	// the aging mechanism and must not move when the shipped default is retuned.
+	body := "profile:\n  github_login: test-user\npolling:\n  freshness_cutoff_min: 15\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return path

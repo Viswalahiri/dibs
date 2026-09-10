@@ -48,6 +48,10 @@ const (
 
 	// skipRateCeiling is the alert-fatigue line. Past it, the junk floor is
 	// admitting issues that are not worth the interruption.
+	//
+	// It only means that when a floor is actually set. At a floor of zero a high
+	// skip rate is the operator's own choice showing up in the numbers, and an
+	// alarm that fires every day is one nobody reads.
 	skipRateCeiling = 0.50
 
 	// darkRepoRate is the share of rejections that means a repository has
@@ -436,6 +440,7 @@ func (r *Reaper) reportSpend(ctx context.Context, start, end time.Time) error {
 
 // reportSkipRate is the alert-fatigue instrument. A day where most pushes were
 // skipped means the junk floor is too low, and the fix is one line of config.
+// The daily numbers are always logged; only the Slack warning is conditional.
 func (r *Reaper) reportSkipRate(ctx context.Context, start, end time.Time) error {
 	counts, err := r.store.DecisionCounts(ctx, start, end)
 	if err != nil {
@@ -451,7 +456,7 @@ func (r *Reaper) reportSkipRate(ctx context.Context, start, end time.Time) error
 		"skipped", counts[store.StateSkipped],
 		"snoozed", counts[store.StateSnoozed],
 		"skip_rate", rate)
-	if rate > skipRateCeiling {
+	if rate > skipRateCeiling && r.cfg.Scoring.JunkFloor > 0 {
 		r.warn("skip_rate", fmt.Sprintf(
 			"%.0f%% of yesterday's alerts were skipped (%d of %d). Consider raising scoring.junk_floor.",
 			rate*100, counts[store.StateSkipped], decided))
