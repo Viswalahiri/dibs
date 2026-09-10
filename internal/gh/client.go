@@ -46,9 +46,6 @@ type Response struct {
 	ETag        string
 	Status      int
 	NotModified bool
-	// Link is the raw Link header, used for pagination by the backfill
-	// subcommand. The poller never paginates.
-	Link string
 }
 
 // StatusError is an HTTP status dibs cannot act on, such as 404 for a renamed
@@ -244,7 +241,6 @@ func (c *Client) attempt(ctx context.Context, path, etag, accept string) (Respon
 			Body:   body,
 			ETag:   httpResp.Header.Get("ETag"),
 			Status: httpResp.StatusCode,
-			Link:   httpResp.Header.Get("Link"),
 		}, nil, nil
 
 	case httpResp.StatusCode >= 500:

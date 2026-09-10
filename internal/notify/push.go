@@ -14,14 +14,13 @@ import (
 	"github.com/Viswalahiri/dibs/internal/filter"
 	"github.com/Viswalahiri/dibs/internal/gh"
 	"github.com/Viswalahiri/dibs/internal/store"
-	"github.com/Viswalahiri/dibs/internal/triage"
 	"github.com/slack-go/slack"
 )
 
 const pushBatch = 5
 
 // KindAlert and KindWarning are the two outbox message kinds. An alert hangs
-// off an issue and can be updated later; a warning is a standalone line.
+// off an issue; a warning is a standalone operational line.
 const (
 	KindAlert   = "alert"
 	KindWarning = "warning"
@@ -36,10 +35,10 @@ type Message struct {
 	Blocks  slack.Blocks `json:"blocks"`
 }
 
-// Pusher turns scored issues into queued Slack alerts. Between scoring and
-// pushing, dibs has spent five to fifteen seconds on enrichment and a model
-// call, which on a busy repository is long enough for someone to claim the
-// issue. So it looks again immediately before sending.
+// Pusher turns screened issues into queued Slack alerts. Between the poll and
+// the push, dibs has spent a few seconds fetching the thread, which on a busy
+// repository is long enough for someone to claim the issue. So it looks again
+// immediately before sending.
 type Pusher struct {
 	client *gh.Client
 	store  *store.Store
@@ -84,7 +83,7 @@ func (p *Pusher) Run(ctx context.Context) error {
 }
 
 func (p *Pusher) Drain(ctx context.Context) (int, error) {
-	claimed, err := p.store.Claim(ctx, store.StateScored, pushBatch, p.owner,
+	claimed, err := p.store.Claim(ctx, store.StateReady, pushBatch, p.owner,
 		p.cfg.Reaper.LeaseTTL(), p.now())
 	if err != nil {
 		return 0, err
@@ -119,20 +118,11 @@ func (p *Pusher) one(ctx context.Context, iss store.Issue) error {
 		return p.store.ClaimedBeforePush(ctx, iss.ID)
 	}
 
-	var response triage.Response
-	if iss.TriageJSON != "" {
-		// A degraded row carries a marker rather than a verdict. Decoding it
-		// fails, and an alert with no summary is still worth sending.
-		if decoded, err := triage.Decode([]byte(iss.TriageJSON)); err == nil {
-			response = decoded
-		}
-	}
-
 	now := p.now()
-	blocks := Alert(iss, repo, response, p.cfg, now)
+	blocks := Alert(iss, repo, now)
 	payload, err := json.Marshal(Message{
 		IssueID: iss.ID,
-		Text:    fmt.Sprintf("%d · %s #%d · %s", iss.Score.Int64, repo.Slug(), iss.Number, iss.Title),
+		Text:    fmt.Sprintf("%s #%d · %s", repo.Slug(), iss.Number, iss.Title),
 		Blocks:  slack.Blocks{BlockSet: blocks},
 	})
 	if err != nil {
@@ -154,10 +144,10 @@ func (p *Pusher) one(ctx context.Context, iss store.Issue) error {
 // the whole system worth running: a ping means the issue was unclaimed seconds
 // ago.
 //
-// It runs immediately before the push, and again when Track is pressed, which
-// covers the minutes spent deciding.
+// It runs immediately before the push, which is the last moment dibs can tell
+// the difference.
 //
-// known is the assignee list dibs recorded when it scored the issue. Only a name
+// known is the assignee list dibs recorded when it first saw the issue. Only a name
 // that was not there then counts as taken. An issue assigned before dibs ever
 // saw it was surfaced deliberately, because projects hand assignments out by bot
 // and by round-robin, and rejecting it here would quietly undo that one stage
@@ -197,47 +187,6 @@ func StillAvailable(ctx context.Context, client *gh.Client, repo store.Repo, num
 		}
 	}
 	return false, "", nil
-}
-
-// snoozeWindow is how long Snooze holds an issue back. Most snoozed issues get
-// claimed inside the hour and die silently at the re-check, which is the point.
-const snoozeWindow = time.Hour
-
-// Resurfacer returns snoozed issues to the push queue once their hour is up.
-// They go back through `scored`, so the push worker's freshness re-check runs
-// again rather than needing a second copy of it here.
-type Resurfacer struct {
-	store *store.Store
-	log   *slog.Logger
-	now   func() time.Time
-}
-
-func NewResurfacer(s *store.Store, log *slog.Logger) *Resurfacer {
-	return &Resurfacer{store: s, log: log, now: func() time.Time { return time.Now().UTC() }}
-}
-
-func (r *Resurfacer) Run(ctx context.Context) error {
-	ticker := time.NewTicker(time.Minute)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-		}
-		due, err := r.store.Snoozed(ctx, r.now().Add(-snoozeWindow))
-		if err != nil {
-			r.log.Error("read snoozed issues", "err", err)
-			continue
-		}
-		for _, iss := range due {
-			if err := r.store.Resurface(ctx, iss.ID); err != nil && !errors.Is(err, store.ErrNotClaimable) {
-				r.log.Error("resurface issue", "issue_id", iss.ID, "err", err)
-				continue
-			}
-			r.log.Info("resurfaced", "issue_id", iss.ID, "number", iss.Number)
-		}
-	}
 }
 
 // newlyAssigned reports whether anyone has taken the issue since dibs recorded

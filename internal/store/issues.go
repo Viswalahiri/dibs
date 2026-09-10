@@ -28,30 +28,16 @@ type Issue struct {
 	FirstSeenAt  time.Time
 	State        State
 	RejectReason RejectReason
-	Score        sql.NullInt64
-	EffortLowH   float64
-	EffortHighH  float64
 	SurfacedAt   time.Time
-	DecidedAt    time.Time
-
-	// EnrichmentJSON is the encoded gh.Context the enricher fetched, and
-	// TriageJSON is the model's raw response. store treats both as opaque;
-	// gh and triage own their shapes. Each is empty until its stage has run.
-	EnrichmentJSON string
-	TriageJSON     string
 }
 
 // ErrNotClaimable is returned when a transition is attempted against a row
-// that has already moved on, which is what a double-tapped Slack button looks
-// like.
+// that has already moved on, which is what a retried lease looks like.
 var ErrNotClaimable = errors.New("issue is no longer in the expected state")
 
 const issueColumns = `id, repo_id, number, node_id, title, body, html_url, author,
 	author_assoc, labels, assignees, comment_count, created_at, first_seen_at, state,
-	COALESCE(reject_reason, ''), score,
-	COALESCE(effort_low_h, 0), COALESCE(effort_high_h, 0),
-	surfaced_at, decided_at,
-	COALESCE(enrichment_json, ''), COALESCE(triage_json, '')`
+	COALESCE(reject_reason, ''), surfaced_at`
 
 func scanIssue(sc interface{ Scan(...any) error }) (Issue, error) {
 	var (
@@ -61,13 +47,11 @@ func scanIssue(sc interface{ Scan(...any) error }) (Issue, error) {
 		created       int64
 		firstSeen     int64
 		surfaced      sql.NullInt64
-		decided       sql.NullInt64
 	)
 	err := sc.Scan(&iss.ID, &iss.RepoID, &iss.Number, &iss.NodeID, &iss.Title, &iss.Body,
 		&iss.HTMLURL, &iss.Author, &iss.AuthorAssoc, &labelsJSON, &assigneesJSON,
 		&iss.CommentCount, &created, &firstSeen, &iss.State, &iss.RejectReason,
-		&iss.Score, &iss.EffortLowH, &iss.EffortHighH,
-		&surfaced, &decided, &iss.EnrichmentJSON, &iss.TriageJSON)
+		&surfaced)
 	if err != nil {
 		return Issue{}, err
 	}
@@ -80,13 +64,12 @@ func scanIssue(sc interface{ Scan(...any) error }) (Issue, error) {
 	iss.CreatedAt = time.Unix(created, 0).UTC()
 	iss.FirstSeenAt = time.Unix(firstSeen, 0).UTC()
 	iss.SurfacedAt = timeOrZero(surfaced)
-	iss.DecidedAt = timeOrZero(decided)
 	return iss, nil
 }
 
 // Insert records a newly seen issue. It reports inserted=false when the
 // (repo, number) pair is already known, which is how a repeated page or an
-// overlapping backfill stays a no-op instead of emitting the issue twice.
+// re-poll of the same page stays a no-op instead of emitting it twice.
 func (s *Store) Insert(ctx context.Context, iss Issue) (id int64, inserted bool, err error) {
 	if !iss.State.Valid() {
 		return 0, false, fmt.Errorf("insert issue %d: unknown state %q", iss.Number, iss.State)
@@ -226,82 +209,25 @@ func (s *Store) CountByState(ctx context.Context, repoID int64) (map[State]int, 
 	return out, rows.Err()
 }
 
-// SaveEnrichment stores the fetched context and moves the issue from new to
-// enriched in one statement, so a crash can never leave a row marked enriched
-// with nothing to show for it. It returns ErrNotClaimable when the row has
-// already moved on, which is what a retried lease looks like.
-func (s *Store) SaveEnrichment(ctx context.Context, id int64, enrichmentJSON string) error {
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE issues
-		   SET enrichment_json = ?, state = ?, lease_owner = NULL, lease_expires_at = NULL
-		 WHERE id = ? AND state = ?`,
-		enrichmentJSON, string(StateEnriched), id, string(StateNew))
-	if err != nil {
-		return fmt.Errorf("save enrichment for issue %d: %w", id, err)
+// SaveVerdict commits the filter's decision and moves the issue out of `new`
+// in one statement, so a crash can never leave a row marked ready without
+// having been screened. It returns ErrNotClaimable when the row has already
+// moved on, which is what a retried lease looks like.
+func (s *Store) SaveVerdict(ctx context.Context, id int64, to State, reason RejectReason) error {
+	if err := checkTransition(StateNew, to); err != nil {
+		return fmt.Errorf("save verdict for issue %d: %w", id, err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return ErrNotClaimable
-	}
-	return nil
-}
-
-// TriageRun is one attempt at scoring an issue, successful or not. Failures
-// are recorded too: a run of them is what the outage and spend warnings read.
-type TriageRun struct {
-	IssueID   int64
-	Model     string
-	InputTok  int
-	OutputTok int
-	LatencyMS int
-	OK        bool
-	Err       string
-}
-
-func (s *Store) RecordTriageRun(ctx context.Context, run TriageRun, at time.Time) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO triage_runs (issue_id, model, input_tok, output_tok, latency_ms, ok, error, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		run.IssueID, run.Model, run.InputTok, run.OutputTok, run.LatencyMS,
-		boolToInt(run.OK), nullIfEmpty(run.Err), at.Unix())
-	if err != nil {
-		return fmt.Errorf("record triage run for issue %d: %w", run.IssueID, err)
-	}
-	return nil
-}
-
-// TriageResult is everything one scoring produces. It is written with the state
-// change in a single statement, so an issue is never left marked scored with no
-// score on it.
-type TriageResult struct {
-	Score        int
-	EffortLowH   float64
-	EffortHighH  float64
-	Input        string
-	JSON         string
-	State        State
-	RejectReason RejectReason
-}
-
-// SaveTriage commits the score and moves the issue out of enriched.
-func (s *Store) SaveTriage(ctx context.Context, id int64, r TriageResult) error {
-	if err := checkTransition(StateEnriched, r.State); err != nil {
-		return fmt.Errorf("save triage for issue %d: %w", id, err)
+	if to == StateRejected && reason == "" {
+		return fmt.Errorf("save verdict for issue %d: a rejection needs a reason", id)
 	}
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE issues
-		   SET score = ?, effort_low_h = ?, effort_high_h = ?,
-		       triage_input = ?, triage_json = ?,
-		       state = ?, reject_reason = ?,
+		   SET state = ?, reject_reason = ?,
 		       lease_owner = NULL, lease_expires_at = NULL
 		 WHERE id = ? AND state = ?`,
-		r.Score, r.EffortLowH, r.EffortHighH, r.Input, r.JSON,
-		string(r.State), nullIfEmpty(string(r.RejectReason)), id, string(StateEnriched))
+		string(to), nullIfEmpty(string(reason)), id, string(StateNew))
 	if err != nil {
-		return fmt.Errorf("save triage for issue %d: %w", id, err)
+		return fmt.Errorf("save verdict for issue %d: %w", id, err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
@@ -313,64 +239,22 @@ func (s *Store) SaveTriage(ctx context.Context, id int64, r TriageResult) error 
 	return nil
 }
 
-// CallsSince counts triage attempts made since t. The daily cap is enforced
-// against this rather than an in-memory counter, so a restart cannot reset it.
-func (s *Store) CallsSince(ctx context.Context, t time.Time) (int, error) {
-	var n int
-	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM triage_runs WHERE created_at >= ?`, t.Unix()).Scan(&n)
-	if err != nil {
-		return 0, fmt.Errorf("count triage runs: %w", err)
-	}
-	return n, nil
-}
-
-// TokensSince sums what has been spent since t, for the monthly budget check.
-func (s *Store) TokensSince(ctx context.Context, t time.Time) (input, output int, err error) {
-	row := s.db.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(input_tok), 0), COALESCE(SUM(output_tok), 0)
-		  FROM triage_runs WHERE created_at >= ?`, t.Unix())
-	if err := row.Scan(&input, &output); err != nil {
-		return 0, 0, fmt.Errorf("sum triage tokens: %w", err)
-	}
-	return input, output, nil
-}
-
-func boolToInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
-}
-
-// Surface records that the Slack alert went out. scored -> pushed.
+// Surface records that the Slack alert went out. ready -> pushed, and the end
+// of the issue's life in dibs.
 func (s *Store) Surface(ctx context.Context, id int64, at time.Time) error {
-	return s.move(ctx, id, StateScored, StatePushed, "", "surfaced_at", at)
+	return s.move(ctx, id, StateReady, StatePushed, "", "surfaced_at", at)
 }
 
 // ClaimedBeforePush records that the re-check immediately before sending found
 // the issue taken. No notification is sent.
 func (s *Store) ClaimedBeforePush(ctx context.Context, id int64) error {
-	return s.move(ctx, id, StateScored, StateClaimedBeforePush, "", "", time.Time{})
+	return s.move(ctx, id, StateReady, StateClaimedBeforePush, "", "", time.Time{})
 }
 
-// Decide records the operator's button press. It is idempotent by construction:
-// the update is conditional on the row still being in `pushed`, so a
-// double-tapped button finds nothing to change and reports ErrNotClaimable.
-func (s *Store) Decide(ctx context.Context, id int64, to State, at time.Time) error {
-	return s.move(ctx, id, StatePushed, to, "", "decided_at", at)
-}
-
-// Resurface returns a snoozed issue to the push queue. The push worker's
-// freshness re-check runs again from there, which is why snoozing routes back
-// through `scored` rather than straight to a second notification.
-func (s *Store) Resurface(ctx context.Context, id int64) error {
-	return s.move(ctx, id, StateSnoozed, StateScored, "", "", time.Time{})
-}
-
-// Expire ages an issue out of the queue. Legal from scored and snoozed.
-func (s *Store) Expire(ctx context.Context, id int64, from State) error {
-	return s.move(ctx, id, from, StateExpired, "", "", time.Time{})
+// Expire ages a ready issue out of the queue. It only fires when the push
+// worker has been stuck long enough that surfacing the issue is pointless.
+func (s *Store) Expire(ctx context.Context, id int64) error {
+	return s.move(ctx, id, StateReady, StateExpired, "", "", time.Time{})
 }
 
 // move is the one conditional state change every transition above goes
@@ -406,74 +290,14 @@ func (s *Store) move(ctx context.Context, id int64, from, to State, reason Rejec
 	return nil
 }
 
-// Track records that the operator took the issue. Claiming itself happens in
-// the browser; this is only dibs' note that it did.
-func (s *Store) Track(ctx context.Context, issueID int64, at time.Time) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO tracked (issue_id, tracked_at, outcome)
-		VALUES (?, ?, 'pending')
-		ON CONFLICT(issue_id) DO NOTHING`, issueID, at.Unix())
-	if err != nil {
-		return fmt.Errorf("track issue %d: %w", issueID, err)
-	}
-	return nil
-}
-
-// Snoozed returns issues whose snooze has run out. The deadline is decided_at
-// plus the snooze window; there is no separate column because a snoozed issue
-// has exactly one decision on it.
-func (s *Store) Snoozed(ctx context.Context, before time.Time) ([]Issue, error) {
+// PushedSince returns issues notified at or after t, newest first. The status
+// subcommand reads it.
+func (s *Store) PushedSince(ctx context.Context, t time.Time) ([]Issue, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+issueColumns+` FROM issues
-		  WHERE state = ? AND decided_at IS NOT NULL AND decided_at < ?
-		  ORDER BY decided_at`, string(StateSnoozed), before.Unix())
+		  WHERE surfaced_at >= ? ORDER BY surfaced_at DESC`, t.Unix())
 	if err != nil {
-		return nil, fmt.Errorf("read snoozed issues: %w", err)
-	}
-	defer rows.Close()
-	var out []Issue
-	for rows.Next() {
-		iss, err := scanIssue(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, iss)
-	}
-	return out, rows.Err()
-}
-
-// Triaged returns every issue that has a stored model response, newest first.
-// `dibs replay` reads these to re-score under a candidate config without
-// spending anything.
-func (s *Store) Triaged(ctx context.Context) ([]Issue, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+issueColumns+` FROM issues
-		  WHERE triage_json IS NOT NULL AND triage_json != ''
-		  ORDER BY first_seen_at DESC`)
-	if err != nil {
-		return nil, fmt.Errorf("read triaged issues: %w", err)
-	}
-	defer rows.Close()
-	var out []Issue
-	for rows.Next() {
-		iss, err := scanIssue(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, iss)
-	}
-	return out, rows.Err()
-}
-
-// ScoredSince returns issues first seen at or after t that carry a score,
-// newest first. The status reports read it.
-func (s *Store) ScoredSince(ctx context.Context, t time.Time) ([]Issue, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+issueColumns+` FROM issues
-		  WHERE score IS NOT NULL AND first_seen_at >= ?
-		  ORDER BY first_seen_at DESC`, t.Unix())
-	if err != nil {
-		return nil, fmt.Errorf("read scored issues: %w", err)
+		return nil, fmt.Errorf("read pushed issues: %w", err)
 	}
 	defer rows.Close()
 	var out []Issue

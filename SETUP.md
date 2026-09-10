@@ -54,8 +54,8 @@ have already edited, so you can run it again safely.
 
 | File | What it holds |
 |---|---|
-| `~/.config/dibs/env` | Your four tokens. Mode 0600. Never committed. |
-| `~/.config/dibs/dibs.yaml` | Tuning: score floor, poll interval, model, budgets. |
+| `~/.config/dibs/env` | Your two tokens. Mode 0600. Never committed. |
+| `~/.config/dibs/dibs.yaml` | Your login, timezone, and the poll intervals. |
 | `~/.config/dibs/repos.yaml` | The repositories to watch. |
 
 ## 4. Paste your tokens
@@ -78,8 +78,12 @@ The GitHub token is a fine-grained personal access token from
 public repositories and grant nothing else. Dibs never writes to GitHub, so a
 read-only token is not a precaution, it is the whole design.
 
-Only `DIBS_GITHUB_TOKEN` is required to poll. The other three are checked when
-the stages that need them are running.
+Only `DIBS_GITHUB_TOKEN` is required to poll. The Slack bot token is checked
+when you run without `--dry-run`.
+
+The Slack app needs one scope, `chat:write`, and nothing else. Dibs only posts,
+so leave interactivity switched off. There is no app-level token and no
+inbound connection.
 
 ## 5. Set your GitHub login and your repositories
 
@@ -98,16 +102,11 @@ issues you claimed yourself.
 ```yaml
 repos:
   - slug: golang/go
-    receptivity: normal
   - slug: prometheus/prometheus
-    receptivity: high
-    stacks: [go]
     notes: "maintainers reply within a day"
 ```
 
-`receptivity` is your judgment about how open the maintainers are to outside
-contributions. It is `high`, `normal`, or `cautious`, and it multiplies the
-score.
+`notes` is for you. Dibs stores it and never reads it.
 
 ## 6. Run it
 
@@ -122,8 +121,7 @@ shell instead of a subshell, which is what makes the variables stick.
 
 On the first run Dibs adopts each repository. It records the issues currently
 open, draws a line under them, and surfaces none of them. That costs one request
-per repository and no model calls at all. Everything from then on is genuinely
-new.
+per repository. Everything from then on is genuinely new.
 
 Leave it running. `Ctrl-C` stops it.
 
@@ -187,22 +185,6 @@ small VPS. `make cross` builds the binary for that. Moving is an `scp` and a
 `systemctl enable`, because the whole system is one static binary and one
 SQLite file.
 
-## Building a corpus to calibrate against
-
-A week of live running produces a handful of scored issues, which is not much
-to set the junk floor against. `dibs backfill` scores a repository's recent
-history into the same database and notifies nobody:
-
-```bash
-./bin/dibs backfill owner/repo --since 720h
-./bin/dibs replay
-```
-
-It stops at the daily call cap and picks up where it left off next time. Those
-scores are indicative rather than a replay of what would have been pushed,
-because an issue is scored as it stands today rather than as it stood in the
-minute it was opened.
-
 ## Where everything lives
 
 | Path | What |
@@ -213,7 +195,25 @@ minute it was opened.
 | `~/.local/state/dibs/` | Logs, when running under systemd |
 
 To start completely over, delete `~/.local/share/dibs/dibs.db`. The next run
-re-adopts every repository at a fresh waterline.
+re-adopts every repository at a fresh waterline and surfaces none of what is
+already open, so this is safe to do at any time.
+
+## Upgrading from the scoring version
+
+The schema changed and there is no migration. Stop the service, delete the
+database, and start it again:
+
+```bash
+systemctl --user stop dibs
+rm ~/.local/share/dibs/dibs.db*
+make service
+```
+
+You lose the scored history, which nothing reads any more. You also want to
+prune `dibs.yaml`, since the `scoring` and `triage` blocks are gone and Dibs
+now refuses to start on an unknown field. `configs/dibs.example.yaml` is the
+current shape. `DIBS_ANTHROPIC_KEY` and `DIBS_SLACK_APP_TOKEN` can come out of
+your env file.
 
 ## When something goes wrong
 
@@ -228,7 +228,7 @@ disagrees with the token. Fix whichever one is wrong.
 **`no such file or directory: bin/dibs`** means you have not run `make build`.
 
 **Nothing is printed for hours.** That is usually correct. Dibs only reports
-issues opened in the last fifteen minutes that it has not already seen, and on a
-quiet repository that is genuinely rare. Confirm it is working with
-`./bin/dibs status --repos`, which shows the waterline and issue counts per
-repository. Run with `--debug` to see every poll.
+issues opened in the last hour that it has not already seen and that nobody has
+claimed, and on a quiet repository that is genuinely rare. Confirm it is working
+with `./bin/dibs status --repos`, which shows the waterline and issue counts
+per repository. Run with `--debug` to see every poll.

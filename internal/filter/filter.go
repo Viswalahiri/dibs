@@ -1,24 +1,40 @@
-// Package filter is the deterministic rejection stage. It runs on enriched
-// issues, before any model call, and every issue it rejects costs nothing.
+// Package filter is the deterministic rejection stage, and the only thing
+// standing between a new issue and a Slack message.
 //
-// Everything here is a pure function of the issue and its fetched context, so
-// the whole stage is testable without a network or a database.
+// Everything here is a pure function of the issue and the context the enricher
+// fetched, so the whole stage is testable without a network or a database.
+// That context lives here rather than in gh because the filter is its only
+// reader; nothing persists it and nothing looks at it again afterwards.
 //
 // Do not add checks beyond the ones below. The strainer rule is load-bearing:
 // a bad issue reaching Slack costs one click, a good issue killed here costs
 // the issue. Every check that survives here rests on someone having acted, not
 // on a field having been set. An assignee is the case that taught us the
-// difference, and it is scored in triage now rather than killed here.
+// difference, and it is deliberately not a rejection.
 package filter
 
 import (
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/Viswalahiri/dibs/internal/config"
-	"github.com/Viswalahiri/dibs/internal/gh"
 	"github.com/Viswalahiri/dibs/internal/store"
 )
+
+// Context is everything the filter needs beyond the issue row itself. The
+// enricher fetches it, hands it straight to Apply, and drops it.
+type Context struct {
+	HasLinkedPR bool
+	Comments    []Comment
+}
+
+type Comment struct {
+	Login     string
+	Assoc     string
+	Body      string
+	CreatedAt time.Time
+}
 
 // Result is the verdict on one issue. A surviving issue carries no reason.
 type Result struct {
@@ -37,8 +53,8 @@ func reject(r store.RejectReason) Result { return Result{Rejected: true, Reason:
 // yet, which describes exactly the fresh unclaimed issue this system exists to
 // find, and many repositories apply needs-triage to everything automatically.
 //
-// question, discussion, and rfc are absent too. They cost a score penalty in
-// the triage stage instead of a kill here.
+// question, discussion, and rfc are absent too. None of them means the issue is
+// taken, and taken is the only thing this stage decides.
 var killfile = []string{"wontfix", "duplicate", "invalid", "stale"}
 
 // minBodyChars is the length below which a body with no code fence is treated
@@ -125,7 +141,7 @@ func endsSentence(s string, i int) bool {
 // Apply returns the verdict for one enriched issue. Checks run in the order
 // below, so the reason recorded is the most specific fact known about why the
 // issue is unavailable.
-func Apply(iss store.Issue, ctx gh.Context, cfg *config.Config) Result {
+func Apply(iss store.Issue, ctx Context, cfg *config.Config) Result {
 	if ctx.HasLinkedPR {
 		return reject(store.ReasonLinkedPRExists)
 	}
@@ -156,7 +172,7 @@ func hasKillfileLabel(labels []string) bool {
 // claimedByOther reports whether anyone but the operator has said they are
 // taking the issue. The operator's own claim is not a rejection: it is the
 // outcome this whole system exists to produce.
-func claimedByOther(comments []gh.Comment, self string) bool {
+func claimedByOther(comments []Comment, self string) bool {
 	for _, c := range comments {
 		if strings.EqualFold(c.Login, self) {
 			continue

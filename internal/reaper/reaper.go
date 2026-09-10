@@ -1,7 +1,8 @@
 // Package reaper is the housekeeping worker. Everything here is periodic and
-// read-only against GitHub: it returns abandoned rows to their queue, ages out
-// issues nobody decided on, follows what became of the ones the operator took,
-// and reports the handful of numbers that say whether the scoring is calibrated.
+// entirely local: it returns abandoned rows to their queue, ages out issues the
+// push worker never reached, sets each repository's polling rate from how many
+// issues it actually produces, and warns when a repository goes dark. It makes
+// no requests of its own.
 package reaper
 
 import (
@@ -9,34 +10,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
-	"slices"
 	"time"
 
 	"github.com/Viswalahiri/dibs/internal/config"
 	"github.com/Viswalahiri/dibs/internal/gh"
 	"github.com/Viswalahiri/dibs/internal/store"
-	"github.com/Viswalahiri/dibs/internal/triage"
 )
 
 const (
 	tickInterval = 15 * time.Minute
-
-	// outcomeInterval is how long a tracked issue rests between checks. Each
-	// check costs two requests, so at a handful of tracked issues this is
-	// under a request an hour.
-	outcomeInterval = 6 * time.Hour
-	outcomeBatch    = 20
-
-	// nudgeAfter is how long a tracked issue may sit with no pull request of
-	// the operator's own before dibs asks about it. Once, ever.
-	nudgeAfter = 5 * 24 * time.Hour
-
-	// rubricMedianCeiling and rubricDays are the model-compliance instrument.
-	// A model that has started agreeing with everything shows up as a median
-	// that stays high, not as an error.
-	rubricMedianCeiling = 75
-	rubricDays          = 3
 
 	// cadenceMinObservation is how long dibs watches a repository before it
 	// will change its polling rate. Without it a repository adopted this
@@ -45,14 +27,6 @@ const (
 	// on arrival. A week of the configured default costs nothing, because a
 	// 304 consumes no rate-limit quota.
 	cadenceMinObservation = 7 * 24 * time.Hour
-
-	// skipRateCeiling is the alert-fatigue line. Past it, the junk floor is
-	// admitting issues that are not worth the interruption.
-	//
-	// It only means that when a floor is actually set. At a floor of zero a high
-	// skip rate is the operator's own choice showing up in the numbers, and an
-	// alarm that fires every day is one nobody reads.
-	skipRateCeiling = 0.50
 
 	// darkRepoRate is the share of rejections that means a repository has
 	// acquired a label bot rather than gone quiet. Measured over a week, so a
@@ -65,12 +39,11 @@ const (
 // Reaper runs every pipeline chore that is not on the path from an issue to a
 // Slack message.
 type Reaper struct {
-	client *gh.Client
-	store  *store.Store
-	cfg    *config.Config
-	log    *slog.Logger
-	warn   gh.Warner
-	now    func() time.Time
+	store *store.Store
+	cfg   *config.Config
+	log   *slog.Logger
+	warn  gh.Warner
+	now   func() time.Time
 
 	// lastDaily is the local date the daily pass last completed. It is held in
 	// memory rather than persisted because every step of that pass converges:
@@ -85,9 +58,9 @@ type Option func(*Reaper)
 // waiting for one.
 func WithClock(f func() time.Time) Option { return func(r *Reaper) { r.now = f } }
 
-func New(client *gh.Client, s *store.Store, cfg *config.Config, log *slog.Logger, warn gh.Warner, opts ...Option) *Reaper {
+func New(s *store.Store, cfg *config.Config, log *slog.Logger, warn gh.Warner, opts ...Option) *Reaper {
 	r := &Reaper{
-		client: client, store: s, cfg: cfg, log: log, warn: warn,
+		store: s, cfg: cfg, log: log, warn: warn,
 		now: func() time.Time { return time.Now().UTC() },
 	}
 	for _, o := range opts {
@@ -122,8 +95,6 @@ func (r *Reaper) Tick(ctx context.Context) error {
 	}{
 		{"release leases", r.releaseLeases},
 		{"expire stale issues", r.expireStale},
-		{"track outcomes", r.trackOutcomes},
-		{"nudge", r.nudge},
 		{"daily", r.daily},
 	}
 	var errs []error
@@ -152,138 +123,30 @@ func (r *Reaper) releaseLeases(ctx context.Context, now time.Time) error {
 	return nil
 }
 
-// expireStale drops issues nobody decided on. A scored issue that never got
-// pushed, or a snoozed one that never came back, is long past the window where
-// claiming it was realistic.
+// expireStale drops issues the push worker never reached. In practice that
+// means Slack was unreachable for a fortnight, by which point claiming the
+// issue is no longer realistic.
 func (r *Reaper) expireStale(ctx context.Context, now time.Time) error {
-	cutoff := now.Add(-r.cfg.Reaper.ExpireAfter())
+	stale, err := r.store.StaleIssues(ctx, store.StateReady, now.Add(-r.cfg.Reaper.ExpireAfter()))
+	if err != nil {
+		return err
+	}
 	var errs []error
-	for _, state := range []store.State{store.StateScored, store.StateSnoozed} {
-		stale, err := r.store.StaleIssues(ctx, state, cutoff)
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		for _, iss := range stale {
-			if err := r.store.Expire(ctx, iss.ID, state); err != nil {
-				if errors.Is(err, store.ErrNotClaimable) {
-					continue // a worker moved it on between the read and here
-				}
-				errs = append(errs, err)
-				continue
+	for _, iss := range stale {
+		if err := r.store.Expire(ctx, iss.ID); err != nil {
+			if errors.Is(err, store.ErrNotClaimable) {
+				continue // the push worker moved it on between the read and here
 			}
-			r.log.Info("expired", "issue_id", iss.ID, "number", iss.Number, "from", state)
-		}
-	}
-	return errors.Join(errs...)
-}
-
-// trackOutcomes follows the issues the operator took. It reads GitHub and
-// writes SQLite, never the other way round: the assignment and the pull
-// request it records are ones the operator made by hand.
-func (r *Reaper) trackOutcomes(ctx context.Context, now time.Time) error {
-	due, err := r.store.TrackedDue(ctx, now.Add(-outcomeInterval), outcomeBatch)
-	if err != nil {
-		return err
-	}
-	var errs []error
-	for _, t := range due {
-		if err := r.checkOutcome(ctx, t, now); err != nil {
-			errs = append(errs, fmt.Errorf("issue %d: %w", t.IssueID, err))
-		}
-	}
-	return errors.Join(errs...)
-}
-
-func (r *Reaper) checkOutcome(ctx context.Context, t store.Tracked, now time.Time) error {
-	iss, err := r.store.IssueByID(ctx, t.IssueID)
-	if err != nil {
-		return err
-	}
-	repo, err := r.store.RepoByID(ctx, iss.RepoID)
-	if err != nil {
-		return err
-	}
-	self := r.cfg.Profile.GitHubLogin
-
-	var current gh.Issue
-	path := fmt.Sprintf("/repos/%s/%s/issues/%d",
-		url.PathEscape(repo.Owner), url.PathEscape(repo.Name), iss.Number)
-	if _, _, err := r.client.GetJSON(ctx, path, "", &current); err != nil {
-		// A transferred or deleted issue will never answer. Closing it out
-		// stops dibs asking about it twice a day forever.
-		if notFound(err) {
-			t.ClosedAt = now
-			t.Outcome = store.OutcomeLost
-			r.log.Info("tracked issue is gone", "repo", repo.Slug(), "number", iss.Number)
-			return r.store.SaveOutcome(ctx, t, now)
-		}
-		return err
-	}
-
-	if t.AssignedAt.IsZero() && slices.Contains(current.AssigneeLogins(), self) {
-		t.AssignedAt = now
-		r.log.Info("assigned on github", "repo", repo.Slug(), "number", iss.Number)
-	}
-
-	prs, err := r.client.LinkedPRs(ctx, repo.Owner, repo.Name, iss.Number)
-	if err != nil {
-		return err
-	}
-	for _, pr := range prs {
-		// Only the operator's own pull request counts. Somebody else's means
-		// the issue was lost, and silencing the nudge over it would hide that.
-		if pr.Author == self {
-			t.PRURL = pr.HTMLURL
-			break
-		}
-	}
-
-	if current.State == "closed" {
-		t.ClosedAt = now
-		if current.ClosedAt != nil {
-			t.ClosedAt = current.ClosedAt.UTC()
-		}
-		t.Outcome = store.OutcomeLost
-		if t.PRURL != "" {
-			t.Outcome = store.OutcomeLanded
-		}
-		r.log.Info("outcome",
-			"repo", repo.Slug(), "number", iss.Number, "outcome", t.Outcome, "pr", t.PRURL)
-	}
-	return r.store.SaveOutcome(ctx, t, now)
-}
-
-// nudge asks once about a tracked issue that has gone five days without a pull
-// request. Releasing it is a browser action; dibs only raises the question.
-func (r *Reaper) nudge(ctx context.Context, now time.Time) error {
-	due, err := r.store.NudgeDue(ctx, now.Add(-nudgeAfter))
-	if err != nil {
-		return err
-	}
-	var errs []error
-	for _, t := range due {
-		iss, err := r.store.IssueByID(ctx, t.IssueID)
-		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
-		repo, err := r.store.RepoByID(ctx, iss.RepoID)
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		// The message carries the tracked date rather than an elapsed time, so
-		// it is identical on every tick and the outbox dedupe key holds.
-		r.warn(fmt.Sprintf("nudge:%d", t.IssueID), fmt.Sprintf(
-			"still on <%s|%s #%d>? Tracked %s, no PR of yours linked yet.",
-			iss.HTMLURL, repo.Slug(), iss.Number, t.TrackedAt.Format("2 Jan")))
+		r.log.Info("expired", "issue_id", iss.ID, "number", iss.Number)
 	}
 	return errors.Join(errs...)
 }
 
-// daily runs the reports and the cadence recompute once a day, at or after the
-// configured hour. A laptop asleep at three in the morning runs them on wake
+// daily runs the cadence recompute and the dark-repo report once a day, at or
+// after the configured hour. A laptop asleep at three in the morning runs them on wake
 // instead of skipping the day.
 func (r *Reaper) daily(ctx context.Context, now time.Time) error {
 	loc := r.location()
@@ -296,17 +159,13 @@ func (r *Reaper) daily(ctx context.Context, now time.Time) error {
 		return nil
 	}
 
-	// Every report reads the previous whole local day, so its numbers cannot
-	// change after the fact and a repeated pass sends a byte-identical message
-	// that the outbox drops.
+	// The dark-repo report reads whole days that have already ended, so its
+	// numbers cannot change after the fact and a repeated pass sends a
+	// byte-identical message that the outbox drops.
 	end := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc)
-	start := end.AddDate(0, 0, -1)
 
 	errs := []error{
 		r.recomputeCadence(ctx, now),
-		r.reportScores(ctx, end),
-		r.reportSpend(ctx, start, end),
-		r.reportSkipRate(ctx, start, end),
 		r.reportDarkRepos(ctx, end),
 	}
 	if err := errors.Join(errs...); err != nil {
@@ -384,86 +243,6 @@ func (r *Reaper) intervalFor(rate float64) int {
 	return max(sec, r.cfg.Polling.MinIntervalSec)
 }
 
-// reportScores logs the day's score distribution and warns when the model has
-// stopped discriminating. A rubric the model agrees with everywhere produces a
-// median that stays high, which no single response would reveal.
-func (r *Reaper) reportScores(ctx context.Context, end time.Time) error {
-	medians := make([]int, 0, rubricDays)
-	for i := 0; i < rubricDays; i++ {
-		scores, err := r.store.ScoresBetween(ctx, end.AddDate(0, 0, -i-1), end.AddDate(0, 0, -i))
-		if err != nil {
-			return err
-		}
-		if i == 0 {
-			if len(scores) == 0 {
-				r.log.Info("scores", "count", 0)
-				return nil
-			}
-			r.log.Info("scores",
-				"count", len(scores),
-				"median", percentile(scores, 0.50),
-				"p90", percentile(scores, 0.90))
-		}
-		if len(scores) == 0 {
-			return nil // an idle day breaks the run rather than extending it
-		}
-		medians = append(medians, percentile(scores, 0.50))
-	}
-	for _, m := range medians {
-		if m <= rubricMedianCeiling {
-			return nil
-		}
-	}
-	r.warn("rubric", fmt.Sprintf(
-		"scoring median has been above %d for %d days (%v). The rubric needs recalibration.",
-		rubricMedianCeiling, rubricDays, medians))
-	return nil
-}
-
-// reportSpend logs what the day's triage actually cost. It is the measured
-// number that replaces the estimate in the plan.
-func (r *Reaper) reportSpend(ctx context.Context, start, end time.Time) error {
-	calls, input, output, err := r.store.SpendBetween(ctx, start, end)
-	if err != nil {
-		return err
-	}
-	if calls == 0 {
-		return nil
-	}
-	r.log.Info("spend",
-		"calls", calls,
-		"input_tok_per_call", input/calls,
-		"output_tok_per_call", output/calls,
-		"usd", triage.Cost(input, output, r.cfg.Triage.Cost))
-	return nil
-}
-
-// reportSkipRate is the alert-fatigue instrument. A day where most pushes were
-// skipped means the junk floor is too low, and the fix is one line of config.
-// The daily numbers are always logged; only the Slack warning is conditional.
-func (r *Reaper) reportSkipRate(ctx context.Context, start, end time.Time) error {
-	counts, err := r.store.DecisionCounts(ctx, start, end)
-	if err != nil {
-		return err
-	}
-	decided := counts[store.StateTracked] + counts[store.StateSkipped]
-	if decided == 0 {
-		return nil
-	}
-	rate := float64(counts[store.StateSkipped]) / float64(decided)
-	r.log.Info("decisions",
-		"tracked", counts[store.StateTracked],
-		"skipped", counts[store.StateSkipped],
-		"snoozed", counts[store.StateSnoozed],
-		"skip_rate", rate)
-	if rate > skipRateCeiling && r.cfg.Scoring.JunkFloor > 0 {
-		r.warn("skip_rate", fmt.Sprintf(
-			"%.0f%% of yesterday's alerts were skipped (%d of %d). Consider raising scoring.junk_floor.",
-			rate*100, counts[store.StateSkipped], decided))
-	}
-	return nil
-}
-
 // reportDarkRepos catches a repository that has stopped producing anything
 // dibs will surface. That is almost always a new label bot rather than a quiet
 // week, and it is invisible from the alert stream because the symptom is
@@ -497,21 +276,4 @@ func (r *Reaper) location() *time.Location {
 		return loc
 	}
 	return time.UTC
-}
-
-// percentile reads the nearest rank from an ascending slice. Exact enough for
-// a daily line about five scores.
-func percentile(ascending []int, p float64) int {
-	if len(ascending) == 0 {
-		return 0
-	}
-	i := int(p*float64(len(ascending))+0.9999) - 1
-	return ascending[min(max(i, 0), len(ascending)-1)]
-}
-
-// notFound reports whether err is a 404, which for a tracked issue means it
-// was deleted or transferred.
-func notFound(err error) bool {
-	var se *gh.StatusError
-	return errors.As(err, &se) && se.NotFound()
 }

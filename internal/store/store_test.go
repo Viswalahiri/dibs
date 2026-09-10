@@ -33,8 +33,8 @@ func TestSyncReposPreservesRuntimeState(t *testing.T) {
 	s := open(t)
 
 	want := []config.Repo{
-		{Slug: "golang/go", Receptivity: config.ReceptivityHigh, Stacks: []string{"go"}},
-		{Slug: "rust-lang/rust", Receptivity: config.ReceptivityNormal},
+		{Slug: "golang/go", Notes: "compiler work"},
+		{Slug: "rust-lang/rust"},
 	}
 	if err := s.SyncRepos(ctx, want, 45); err != nil {
 		t.Fatalf("SyncRepos: %v", err)
@@ -44,11 +44,8 @@ func TestSyncReposPreservesRuntimeState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RepoBySlug: %v", err)
 	}
-	if repo.Receptivity != config.ReceptivityHigh {
-		t.Errorf("receptivity = %q, want high", repo.Receptivity)
-	}
-	if len(repo.Stacks) != 1 || repo.Stacks[0] != "go" {
-		t.Errorf("stacks = %v, want [go]", repo.Stacks)
+	if repo.Notes != "compiler work" {
+		t.Errorf("notes = %q, want the configured text", repo.Notes)
 	}
 	if repo.Adopted() {
 		t.Error("a freshly synced repo must not look adopted")
@@ -64,7 +61,7 @@ func TestSyncReposPreservesRuntimeState(t *testing.T) {
 
 	// A SIGHUP re-sync must not re-adopt or rewind the waterline, otherwise
 	// every reload would replay the repository's whole open issue list.
-	want[0].Receptivity = config.ReceptivityCautious
+	want[0].Notes = "runtime work"
 	if err := s.SyncRepos(ctx, want, 45); err != nil {
 		t.Fatalf("re-SyncRepos: %v", err)
 	}
@@ -72,8 +69,8 @@ func TestSyncReposPreservesRuntimeState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RepoBySlug: %v", err)
 	}
-	if repo.Receptivity != config.ReceptivityCautious {
-		t.Errorf("receptivity was not refreshed, got %q", repo.Receptivity)
+	if repo.Notes != "runtime work" {
+		t.Errorf("notes were not refreshed, got %q", repo.Notes)
 	}
 	if !repo.Adopted() {
 		t.Error("adoption was lost across a re-sync")
@@ -253,7 +250,7 @@ func TestAdvanceRefusesIllegalTransitions(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := s.Advance(ctx, id, StateNew, StatePushed, ""); err == nil {
-		t.Error("new -> pushed should be refused; it would skip enrichment and triage")
+		t.Error("new -> pushed should be refused; it would skip the filter")
 	}
 	if err := s.Advance(ctx, id, StateNew, StateRejected, ""); err == nil {
 		t.Error("a rejection without a reason should be refused")
@@ -271,10 +268,10 @@ func TestAdvanceIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Advance(ctx, id, StateNew, StateEnriched, ""); err != nil {
+	if err := s.Advance(ctx, id, StateNew, StateReady, ""); err != nil {
 		t.Fatalf("first advance: %v", err)
 	}
-	err = s.Advance(ctx, id, StateNew, StateEnriched, "")
+	err = s.Advance(ctx, id, StateNew, StateReady, "")
 	if !errors.Is(err, ErrNotClaimable) {
 		t.Errorf("second advance returned %v, want ErrNotClaimable", err)
 	}
@@ -282,8 +279,8 @@ func TestAdvanceIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if iss.State != StateEnriched {
-		t.Errorf("state = %q, want enriched", iss.State)
+	if iss.State != StateReady {
+		t.Errorf("state = %q, want ready", iss.State)
 	}
 }
 
@@ -298,10 +295,10 @@ func TestAdvanceClearsTheLease(t *testing.T) {
 	if _, err := s.Claim(ctx, StateNew, 10, "w1", time.Minute, epoch); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Advance(ctx, id, StateNew, StateEnriched, ""); err != nil {
+	if err := s.Advance(ctx, id, StateNew, StateReady, ""); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.Claim(ctx, StateEnriched, 10, "w2", time.Minute, epoch)
+	got, err := s.Claim(ctx, StateReady, 10, "w2", time.Minute, epoch)
 	if err != nil || len(got) != 1 {
 		t.Fatalf("issue was not claimable in its new state: %d rows, %v", len(got), err)
 	}
@@ -311,7 +308,7 @@ func TestAdvanceClearsTheLease(t *testing.T) {
 // a transition list must itself be a known state.
 func TestStateTableIsClosed(t *testing.T) {
 	terminal := []State{
-		StateBaseline, StateTracked, StateSkipped, StateRejected,
+		StateBaseline, StatePushed, StateRejected,
 		StateAgedOut, StateClaimedBeforePush, StateExpired,
 	}
 	for _, st := range terminal {

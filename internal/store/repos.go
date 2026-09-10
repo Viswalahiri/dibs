@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -13,14 +12,11 @@ import (
 )
 
 // Repo is a persisted repository row. It carries both the operator's config
-// (receptivity, stacks, notes) and the poller's runtime state (etag,
-// waterline, adoption).
+// (notes) and the poller's runtime state (etag, waterline, adoption).
 type Repo struct {
 	ID              int64
 	Owner           string
 	Name            string
-	Receptivity     config.Receptivity
-	Stacks          []string
 	Notes           string
 	PollIntervalSec int
 	ETag            string
@@ -46,8 +42,8 @@ func (r Repo) PollInterval() time.Duration {
 // SyncRepos reconciles the database with repos.yaml. Listed repositories are
 // inserted or have their operator-owned fields refreshed; runtime state
 // (etag, waterline, adoption) is never touched, so a SIGHUP does not re-adopt
-// or replay anything. Repositories no longer listed are disabled rather than
-// deleted, keeping their issue history intact.
+// or re-surface anything. Repositories no longer listed are disabled rather
+// than deleted, keeping their issue history intact.
 func (s *Store) SyncRepos(ctx context.Context, want []config.Repo, defaultIntervalSec int) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -57,19 +53,13 @@ func (s *Store) SyncRepos(ctx context.Context, want []config.Repo, defaultInterv
 
 	keep := make([]string, 0, len(want))
 	for _, r := range want {
-		stacks, err := json.Marshal(nonNil(r.Stacks))
-		if err != nil {
-			return fmt.Errorf("encode stacks for %s: %w", r.Slug, err)
-		}
-		_, err = tx.ExecContext(ctx, `
-			INSERT INTO repos (owner, name, receptivity, stacks, notes, poll_interval_sec, enabled)
-			VALUES (?, ?, ?, ?, ?, ?, 1)
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO repos (owner, name, notes, poll_interval_sec, enabled)
+			VALUES (?, ?, ?, ?, 1)
 			ON CONFLICT(owner, name) DO UPDATE SET
-				receptivity = excluded.receptivity,
-				stacks      = excluded.stacks,
-				notes       = excluded.notes,
-				enabled     = 1`,
-			r.Owner(), r.Name(), string(r.Receptivity), string(stacks), r.Notes, defaultIntervalSec)
+				notes   = excluded.notes,
+				enabled = 1`,
+			r.Owner(), r.Name(), r.Notes, defaultIntervalSec)
 		if err != nil {
 			return fmt.Errorf("upsert repo %s: %w", r.Slug, err)
 		}
@@ -109,25 +99,21 @@ func (s *Store) SyncRepos(ctx context.Context, want []config.Repo, defaultInterv
 	return tx.Commit()
 }
 
-const repoColumns = `id, owner, name, receptivity, stacks, notes, poll_interval_sec,
+const repoColumns = `id, owner, name, notes, poll_interval_sec,
 	COALESCE(etag, ''), last_polled_at, waterline_at, adopted_at, issues_last_30d, enabled`
 
 func scanRepo(sc interface{ Scan(...any) error }) (Repo, error) {
 	var (
 		r          Repo
-		stacksJSON string
 		lastPolled sql.NullInt64
 		waterline  int64
 		adopted    sql.NullInt64
 		enabled    int
 	)
-	err := sc.Scan(&r.ID, &r.Owner, &r.Name, &r.Receptivity, &stacksJSON, &r.Notes,
+	err := sc.Scan(&r.ID, &r.Owner, &r.Name, &r.Notes,
 		&r.PollIntervalSec, &r.ETag, &lastPolled, &waterline, &adopted, &r.IssuesLast30d, &enabled)
 	if err != nil {
 		return Repo{}, err
-	}
-	if err := json.Unmarshal([]byte(stacksJSON), &r.Stacks); err != nil {
-		return Repo{}, fmt.Errorf("decode stacks for %s/%s: %w", r.Owner, r.Name, err)
 	}
 	r.LastPolledAt = timeOrZero(lastPolled)
 	r.WaterlineAt = time.Unix(waterline, 0).UTC()

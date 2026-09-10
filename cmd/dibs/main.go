@@ -22,10 +22,9 @@ import (
 	"github.com/Viswalahiri/dibs/internal/notify"
 	"github.com/Viswalahiri/dibs/internal/reaper"
 	"github.com/Viswalahiri/dibs/internal/store"
-	"github.com/Viswalahiri/dibs/internal/triage"
 )
 
-const usage = "usage: dibs <run|status|replay|backfill>"
+const usage = "usage: dibs <run|status>"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -43,10 +42,6 @@ func run(args []string) error {
 		return cmdRun(args[1:])
 	case "status":
 		return cmdStatus(args[1:])
-	case "replay":
-		return cmdReplay(args[1:])
-	case "backfill":
-		return cmdBackfill(args[1:])
 	default:
 		return fmt.Errorf("unknown command %q; %s", args[0], usage)
 	}
@@ -101,9 +96,9 @@ func cmdRun(args []string) error {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
-	required := []string{config.EnvGitHubToken, config.EnvAnthropicKey}
+	required := []string{config.EnvGitHubToken}
 	if !*dryRun {
-		required = append(required, config.EnvSlackBotToken, config.EnvSlackAppToken)
+		required = append(required, config.EnvSlackBotToken)
 	}
 	l, err := load(required...)
 	if err != nil {
@@ -145,35 +140,24 @@ func cmdRun(args []string) error {
 	warn := newWarner(ctx, l.store, log)
 	poller := gh.NewPoller(client, l.store, l.cfg, log, nil, warn)
 	enricher := gh.NewEnricher(client, l.store, l.cfg, log)
-	triager := triage.NewWorker(
-		triage.NewClient(l.secrets.AnthropicKey, l.cfg), l.store, l.cfg, log)
 	pusher := notify.NewPusher(client, l.store, l.cfg, log)
-	resurfacer := notify.NewResurfacer(l.store, log)
-	reap := reaper.New(client, l.store, l.cfg, log, warn)
+	reap := reaper.New(l.store, l.cfg, log, warn)
+
+	var transport notify.Transport
+	if *dryRun {
+		log.Warn("dry run: alerts go to stdout, no Slack connection")
+		transport = notify.Console{}
+	} else {
+		transport = notify.NewSlack(l.secrets.SlackBotToken, l.cfg.Slack.DeliverTo, log)
+	}
+	sender := notify.NewSender(transport, l.store, log)
 
 	workers := []app.Worker{
 		{Name: "poller", Run: poller.Run},
 		{Name: "enricher", Run: enricher.Run},
-		{Name: "triager", Run: triager.Run},
 		{Name: "pusher", Run: pusher.Run},
-		{Name: "resurfacer", Run: resurfacer.Run},
+		{Name: "sender", Run: sender.Run},
 		{Name: "reaper", Run: reap.Run},
-	}
-
-	if *dryRun {
-		log.Warn("dry run: alerts go to stdout, no Slack connection, buttons unavailable")
-		sender := notify.NewSender(notify.Console{}, l.store, log)
-		workers = append(workers, app.Worker{Name: "sender", Run: sender.Run})
-	} else {
-		slackClient := notify.NewSlack(
-			l.secrets.SlackBotToken, l.secrets.SlackAppToken, l.cfg.Slack.DeliverTo, log)
-		router := notify.NewRouter(l.store, client, slackClient, l.cfg, log)
-		sender := notify.NewSender(slackClient, l.store, log)
-		workers = append(workers,
-			app.Worker{Name: "sender", Run: sender.Run},
-			app.Worker{Name: "slack", Run: func(ctx context.Context) error {
-				return slackClient.Run(ctx, router)
-			}})
 	}
 
 	log.Info("dibs started", "repos", len(l.repos), "db", l.paths.DB, "dry_run", *dryRun)
@@ -219,7 +203,7 @@ func assertGitHubAccess(ctx context.Context, client *gh.Client, cfg *config.Conf
 	}
 	if user.Login != cfg.Profile.GitHubLogin {
 		return fmt.Errorf("token belongs to %q but profile.github_login is %q; "+
-			"the filter and reaper would misread your own comments",
+			"the filter would misread your own comments",
 			user.Login, cfg.Profile.GitHubLogin)
 	}
 	log.Info("github ready",

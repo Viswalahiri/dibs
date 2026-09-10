@@ -97,7 +97,7 @@ func (s *Sender) Flush(ctx context.Context) (int, error) {
 }
 
 // Console prints what would have been sent. It makes the whole pipeline
-// runnable with a GitHub token and an Anthropic key, before a Slack app exists.
+// runnable with nothing but a GitHub token, before a Slack app exists.
 type Console struct{}
 
 func (Console) Post(_ context.Context, m Message) error {
